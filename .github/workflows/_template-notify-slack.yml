@@ -77,8 +77,22 @@ jobs:
               ;;
           esac
 
+      - name: Check Slack webhook
+        id: slack-check
+        env:
+          WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$WEBHOOK" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::SLACK_WEBHOOK_URL not configured — notification will be skipped"
+          fi
+
       - name: Format and send Slack notification
-        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+        if: steps.slack-check.outputs.available == 'true'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           DEPLOY_URL_BLOCK=""
           if [ -n "${{ inputs.deploy_url }}" ]; then
@@ -136,4 +150,4 @@ jobs:
           curl -X POST \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD" \
-            "${{ secrets.SLACK_WEBHOOK_URL }}"
+            "$SLACK_WEBHOOK_URL"

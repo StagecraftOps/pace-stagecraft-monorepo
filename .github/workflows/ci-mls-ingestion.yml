@@ -4,13 +4,13 @@ on:
   push:
     branches: [main, develop]
     paths:
-      - "services/data/mls-ingestion/**"
-      - ".github/workflows/ci-mls-ingestion.yml"
+    - "services/data/mls-ingestion/**"
+    - ".github/workflows/ci-mls-ingestion.yml"
   pull_request:
     branches: [main, develop]
     paths:
-      - "services/data/mls-ingestion/**"
-      - ".github/workflows/ci-mls-ingestion.yml"
+    - "services/data/mls-ingestion/**"
+    - ".github/workflows/ci-mls-ingestion.yml"
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -26,59 +26,59 @@ jobs:
     name: Validate MLS Schema
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install schema validation dependencies
-        working-directory: ${{ env.SERVICE_DIR }}
-        run: pip install jsonschema pyyaml
+    - name: Install schema validation dependencies
+      working-directory: ${{ env.SERVICE_DIR }}
+      run: pip install jsonschema pyyaml
 
-      - name: Validate MLS feed schemas
-        working-directory: ${{ env.SERVICE_DIR }}
-        run: python scripts/validate_schemas.py --schema-dir schemas/
+    - name: Validate MLS feed schemas
+      working-directory: ${{ env.SERVICE_DIR }}
+      run: python scripts/validate_schemas.py --schema-dir schemas/
 
-      - name: Validate RETS configuration
-        working-directory: ${{ env.SERVICE_DIR }}
-        run: python scripts/validate_rets_config.py --config config/rets_feeds.yml
+    - name: Validate RETS configuration
+      working-directory: ${{ env.SERVICE_DIR }}
+      run: python scripts/validate_rets_config.py --config config/rets_feeds.yml
 
   lint:
     name: Lint
     runs-on: ubuntu-latest
     needs: validate-schema
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/mls-ingestion/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+    - name: Cache pip dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('services/data/mls-ingestion/requirements*.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
 
-      - name: Install lint tools
-        run: pip install flake8 black isort pylint
+    - name: Install lint tools
+      run: pip install flake8 black isort pylint
 
-      - name: Run flake8
-        working-directory: ${{ env.SERVICE_DIR }}
-        run: flake8 src/ --max-line-length=120 --extend-ignore=E203,W503
+    - name: Run flake8
+      working-directory: ${{ env.SERVICE_DIR }}
+      run: flake8 src/ --max-line-length=120 --extend-ignore=E203,W503
 
-      - name: Check black formatting
-        working-directory: ${{ env.SERVICE_DIR }}
-        run: black --check src/
+    - name: Check black formatting
+      working-directory: ${{ env.SERVICE_DIR }}
+      run: black --check src/
 
-      - name: Check import order
-        working-directory: ${{ env.SERVICE_DIR }}
-        run: isort --check-only --diff src/
+    - name: Check import order
+      working-directory: ${{ env.SERVICE_DIR }}
+      run: isort --check-only --diff src/
 
   test:
     name: Unit & Integration Tests
@@ -92,56 +92,56 @@ jobs:
           POSTGRES_PASSWORD: mls_pass
           POSTGRES_DB: mls_staging
         ports:
-          - 5432:5432
+        - 5432:5432
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/mls-ingestion/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+    - name: Cache pip dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('services/data/mls-ingestion/requirements*.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
 
-      - name: Install dependencies
-        working-directory: ${{ env.SERVICE_DIR }}
-        run: pip install -r requirements.txt -r requirements-dev.txt
+    - name: Install dependencies
+      working-directory: ${{ env.SERVICE_DIR }}
+      run: pip install -r requirements.txt -r requirements-dev.txt
 
-      - name: Run database migrations
-        working-directory: ${{ env.SERVICE_DIR }}
-        env:
-          DATABASE_URL: postgresql://mls_user:mls_pass@localhost:5432/mls_staging
-        run: python scripts/run_migrations.py
+    - name: Run database migrations
+      working-directory: ${{ env.SERVICE_DIR }}
+      env:
+        DATABASE_URL: postgresql://mls_user:mls_pass@localhost:5432/mls_staging
+      run: python scripts/run_migrations.py
 
-      - name: Run pytest with 85% coverage threshold
-        working-directory: ${{ env.SERVICE_DIR }}
-        env:
-          DATABASE_URL: postgresql://mls_user:mls_pass@localhost:5432/mls_staging
-          ENVIRONMENT: test
-        run: |
-          pytest tests/ \
-            --cov=src \
-            --cov-report=xml \
-            --cov-report=term-missing \
-            --cov-fail-under=85 \
-            -v --tb=short
+    - name: Run pytest with 85% coverage threshold
+      working-directory: ${{ env.SERVICE_DIR }}
+      env:
+        DATABASE_URL: postgresql://mls_user:mls_pass@localhost:5432/mls_staging
+        ENVIRONMENT: test
+      run: |
+        pytest tests/ \
+          --cov=src \
+          --cov-report=xml \
+          --cov-report=term-missing \
+          --cov-fail-under=85 \
+          -v --tb=short
 
-      - name: Upload coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: mls-ingestion-coverage
-          path: ${{ env.SERVICE_DIR }}/coverage.xml
+    - name: Upload coverage
+      uses: actions/upload-artifact@v4
+      with:
+        name: mls-ingestion-coverage
+        path: ${{ env.SERVICE_DIR }}/coverage.xml
 
   docker-build:
     name: Docker Build
@@ -173,8 +173,8 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-security-scan.yml
     with:
-      image_name: mls-ingestion
-      image_tag: ${{ github.sha }}
+      service_name: mls-ingestion
+      working_directory: services/data/mls-ingestion
       severity_threshold: HIGH
     secrets: inherit
 

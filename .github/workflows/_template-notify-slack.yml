@@ -32,7 +32,6 @@ jobs:
   notify-slack:
     name: "Notify Slack — ${{ inputs.service_name }} (${{ inputs.status }})"
     runs-on: ubuntu-latest
-    if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
 
     steps:
       - name: Checkout repository (for commit info)
@@ -79,6 +78,7 @@ jobs:
           esac
 
       - name: Format and send Slack notification
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
         run: |
           DEPLOY_URL_BLOCK=""
           if [ -n "${{ inputs.deploy_url }}" ]; then

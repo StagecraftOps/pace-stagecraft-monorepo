@@ -380,11 +380,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Notify via Slack
-        uses: ./.github/workflows/_template-notify-slack.yml
-        with:
-          service_name: chaos-engineering
-          environment: staging
-          status: ${{ needs.measure-resilience.outputs.resilience_passed == 'true' && 'success' || 'failure' }}
-          triggered_by: scheduler
-        secrets: inherit
+      - name: Report chaos run complete
+        run: |
+          echo "Chaos engineering run complete — see artifacts for full report"
+
+  notify-chaos-result:
+    name: Notify Chaos Engineering Result
+    needs: [measure-resilience, generate-chaos-report]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service_name: chaos-engineering
+      environment: staging
+      status: ${{ needs.measure-resilience.outputs.resilience_passed == 'true' && 'SUCCESS' || 'FAILURE' }}
+      triggered_by: scheduler
+    secrets: inherit

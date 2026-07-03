@@ -170,7 +170,6 @@ jobs:
   full-production-deploy:
     name: "Full Production Deployment"
     needs: canary-validation
-    environment: production
     uses: ./.github/workflows/_template-deploy-k8s.yml
     with:
       environment: production

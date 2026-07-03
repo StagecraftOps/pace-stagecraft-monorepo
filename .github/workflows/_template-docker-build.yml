@@ -33,7 +33,6 @@ jobs:
   docker-build:
     name: "Docker Build — ${{ inputs.service_name }}"
     runs-on: ubuntu-latest
-    if: ${{ secrets.AWS_ACCESS_KEY_ID != '' }}
 
     outputs:
       image_uri: ${{ steps.build-push.outputs.digest }}
@@ -43,7 +42,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Check AWS credentials
+        id: aws-check
+        env:
+          AWS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        run: |
+          if [ -n "$AWS_KEY" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::AWS credentials not configured — Docker build and push steps will be skipped"
+          fi
+
       - name: Configure AWS credentials
+        if: steps.aws-check.outputs.available == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -51,10 +63,12 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
 
       - name: Login to Amazon ECR
+        if: steps.aws-check.outputs.available == 'true'
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Extract Docker metadata
+        if: steps.aws-check.outputs.available == 'true'
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -67,9 +81,11 @@ jobs:
             type=raw,value=${{ inputs.image_tag }}
 
       - name: Set up Docker Buildx
+        if: steps.aws-check.outputs.available == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push Docker image
+        if: steps.aws-check.outputs.available == 'true'
         id: build-push
         uses: docker/build-push-action@v5
         with:
@@ -85,6 +101,7 @@ jobs:
             BUILD_DATE=${{ github.event.repository.updated_at }}
 
       - name: Scan image for vulnerabilities (Trivy)
+        if: steps.aws-check.outputs.available == 'true'
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.ecr_repository }}:${{ inputs.image_tag }}
@@ -95,16 +112,18 @@ jobs:
           ignore-unfixed: true
 
       - name: Upload Trivy scan results to GitHub Security
+        if: steps.aws-check.outputs.available == 'true'
         uses: github/codeql-action/upload-sarif@v3
-        if: always()
         with:
           sarif_file: trivy-results.sarif
           category: trivy-${{ inputs.service_name }}
 
       - name: Output image summary
+        if: always()
         run: |
           echo "## Docker Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "- **Service:** ${{ inputs.service_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Image Tag:** ${{ inputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **AWS Credentials:** ${{ steps.aws-check.outputs.available }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Digest:** ${{ steps.build-push.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Pushed:** ${{ inputs.push_image }}" >> $GITHUB_STEP_SUMMARY

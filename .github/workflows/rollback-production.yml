@@ -75,7 +75,6 @@ jobs:
   perform-rollback:
     name: "Execute Rollback"
     needs: notify-oncall
-    environment: production
     uses: ./.github/workflows/_template-deploy-k8s.yml
     with:
       environment: production

@@ -172,9 +172,11 @@ jobs:
     needs: throughput-test
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service_dir: services/data/realtime-aggregation
-      image_name: realtime-aggregation
-      dockerfile: services/data/realtime-aggregation/Dockerfile
+      service_name: realtime-aggregation
+      ecr_repository: realtime-aggregation
+      dockerfile_path: services/data/realtime-aggregation/Dockerfile
+      image_tag: ${{ github.sha }}
+      push_image: true
     secrets: inherit
 
   integration-test:
@@ -182,9 +184,9 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service_dir: services/data/realtime-aggregation
-      python_version: "3.11"
-      test_path: tests/integration/
+      service_name: realtime-aggregation
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   deploy-staging:
@@ -196,6 +198,7 @@ jobs:
       environment: staging
       service_name: realtime-aggregation
       namespace: data-pipeline
+      cluster_name: staging-cluster
       image_tag: ${{ github.sha }}
     secrets: inherit
 
@@ -205,7 +208,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      workflow_name: "Realtime Aggregation CI"
       service_name: realtime-aggregation
       environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

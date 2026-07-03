@@ -106,9 +106,9 @@ jobs:
     needs: unit-test
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service_dir: services/data/listing-etl
-      python_version: "3.11"
-      test_path: tests/integration/
+      service_name: listing-etl
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   docker-build:
@@ -116,9 +116,11 @@ jobs:
     needs: integration-test
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service_dir: services/data/listing-etl
-      image_name: listing-etl
-      dockerfile: services/data/listing-etl/Dockerfile
+      service_name: listing-etl
+      ecr_repository: listing-etl
+      dockerfile_path: services/data/listing-etl/Dockerfile
+      image_tag: ${{ github.sha }}
+      push_image: true
     secrets: inherit
 
   deploy-staging:
@@ -130,6 +132,7 @@ jobs:
       environment: staging
       service_name: listing-etl
       namespace: data-pipeline
+      cluster_name: staging-cluster
       image_tag: ${{ github.sha }}
     secrets: inherit
 
@@ -149,7 +152,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      workflow_name: "Listing ETL CI"
       service_name: listing-etl
       environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

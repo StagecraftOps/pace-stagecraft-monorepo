@@ -95,9 +95,9 @@ jobs:
     needs: unit-test
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service_dir: services/notification/notification-service
-      node_version: "20"
-      test_path: tests/integration/
+      service_name: notification-service
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   docker-build:
@@ -105,9 +105,11 @@ jobs:
     needs: integration-test
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service_dir: services/notification/notification-service
-      image_name: notification-service
-      dockerfile: services/notification/notification-service/Dockerfile
+      service_name: notification-service
+      ecr_repository: notification-service
+      dockerfile_path: services/notification/notification-service/Dockerfile
+      image_tag: ${{ github.sha }}
+      push_image: true
     secrets: inherit
 
   deploy-staging:
@@ -119,6 +121,7 @@ jobs:
       environment: staging
       service_name: notification-service
       namespace: notification
+      cluster_name: staging-cluster
       image_tag: ${{ github.sha }}
     secrets: inherit
 
@@ -138,7 +141,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      workflow_name: "Notification Service CI"
       service_name: notification-service
       environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

@@ -139,9 +139,11 @@ jobs:
     needs: opt-out-compliance-check
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service_dir: services/notification/sms-service
-      image_name: sms-service
-      dockerfile: services/notification/sms-service/Dockerfile
+      service_name: sms-service
+      ecr_repository: sms-service
+      dockerfile_path: services/notification/sms-service/Dockerfile
+      image_tag: ${{ github.sha }}
+      push_image: true
     secrets: inherit
 
   integration-test:
@@ -149,9 +151,9 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service_dir: services/notification/sms-service
-      node_version: "20"
-      test_path: tests/integration/
+      service_name: sms-service
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   deploy-staging:
@@ -163,6 +165,7 @@ jobs:
       environment: staging
       service_name: sms-service
       namespace: notification
+      cluster_name: staging-cluster
       image_tag: ${{ github.sha }}
     secrets: inherit
 
@@ -172,7 +175,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      workflow_name: "SMS Service CI"
       service_name: sms-service
       environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

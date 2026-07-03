@@ -148,9 +148,11 @@ jobs:
     needs: test
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service_dir: services/data/mls-ingestion
-      image_name: mls-ingestion
-      dockerfile: services/data/mls-ingestion/Dockerfile
+      service_name: mls-ingestion
+      ecr_repository: mls-ingestion
+      dockerfile_path: services/data/mls-ingestion/Dockerfile
+      image_tag: ${{ github.sha }}
+      push_image: true
     secrets: inherit
 
   deploy-staging:
@@ -162,6 +164,7 @@ jobs:
       environment: staging
       service_name: mls-ingestion
       namespace: data-pipeline
+      cluster_name: staging-cluster
       image_tag: ${{ github.sha }}
     secrets: inherit
 
@@ -181,7 +184,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      workflow_name: "MLS Ingestion CI"
       service_name: mls-ingestion
       environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

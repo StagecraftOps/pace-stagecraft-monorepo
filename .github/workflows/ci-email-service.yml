@@ -130,9 +130,11 @@ jobs:
     needs: template-validation
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service_dir: services/notification/email-service
-      image_name: email-service
-      dockerfile: services/notification/email-service/Dockerfile
+      service_name: email-service
+      ecr_repository: email-service
+      dockerfile_path: services/notification/email-service/Dockerfile
+      image_tag: ${{ github.sha }}
+      push_image: true
     secrets: inherit
 
   integration-test:
@@ -140,9 +142,9 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service_dir: services/notification/email-service
-      node_version: "20"
-      test_path: tests/integration/
+      service_name: email-service
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   deploy-staging:
@@ -154,6 +156,7 @@ jobs:
       environment: staging
       service_name: email-service
       namespace: notification
+      cluster_name: staging-cluster
       image_tag: ${{ github.sha }}
     secrets: inherit
 
@@ -163,7 +166,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      workflow_name: "Email Service CI"
       service_name: email-service
       environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

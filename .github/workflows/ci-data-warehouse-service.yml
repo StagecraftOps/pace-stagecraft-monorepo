@@ -120,9 +120,11 @@ jobs:
     needs: migration-dry-run
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service_dir: services/data/data-warehouse-service
-      image_name: data-warehouse-service
-      dockerfile: services/data/data-warehouse-service/Dockerfile
+      service_name: data-warehouse-service
+      ecr_repository: data-warehouse-service
+      dockerfile_path: services/data/data-warehouse-service/Dockerfile
+      image_tag: ${{ github.sha }}
+      push_image: true
     secrets: inherit
 
   integration-test:
@@ -130,9 +132,9 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service_dir: services/data/data-warehouse-service
-      python_version: "3.11"
-      test_path: tests/integration/
+      service_name: data-warehouse-service
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   deploy-staging:
@@ -144,6 +146,7 @@ jobs:
       environment: staging
       service_name: data-warehouse-service
       namespace: data-pipeline
+      cluster_name: staging-cluster
       image_tag: ${{ github.sha }}
     secrets: inherit
 
@@ -153,7 +156,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      workflow_name: "Data Warehouse Service CI"
       service_name: data-warehouse-service
       environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

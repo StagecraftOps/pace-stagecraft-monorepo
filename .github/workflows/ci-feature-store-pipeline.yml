@@ -143,9 +143,11 @@ jobs:
     needs: feature-validation
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service_dir: services/data/feature-store-pipeline
-      image_name: feature-store-pipeline
-      dockerfile: services/data/feature-store-pipeline/Dockerfile
+      service_name: feature-store-pipeline
+      ecr_repository: feature-store-pipeline
+      dockerfile_path: services/data/feature-store-pipeline/Dockerfile
+      image_tag: ${{ github.sha }}
+      push_image: true
     secrets: inherit
 
   integration-test:
@@ -153,9 +155,9 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service_dir: services/data/feature-store-pipeline
-      python_version: "3.11"
-      test_path: tests/integration/
+      service_name: feature-store-pipeline
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   deploy-staging:
@@ -167,6 +169,7 @@ jobs:
       environment: staging
       service_name: feature-store-pipeline
       namespace: data-pipeline
+      cluster_name: staging-cluster
       image_tag: ${{ github.sha }}
     secrets: inherit
 
@@ -176,7 +179,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      workflow_name: "Feature Store Pipeline CI"
       service_name: feature-store-pipeline
       environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

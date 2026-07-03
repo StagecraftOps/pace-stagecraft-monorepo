@@ -150,9 +150,11 @@ jobs:
     needs: alert-rule-validation
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service_dir: services/notification/price-alert-service
-      image_name: price-alert-service
-      dockerfile: services/notification/price-alert-service/Dockerfile
+      service_name: price-alert-service
+      ecr_repository: price-alert-service
+      dockerfile_path: services/notification/price-alert-service/Dockerfile
+      image_tag: ${{ github.sha }}
+      push_image: true
     secrets: inherit
 
   integration-test:
@@ -160,9 +162,9 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service_dir: services/notification/price-alert-service
-      python_version: "3.11"
-      test_path: tests/integration/
+      service_name: price-alert-service
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   deploy-staging:
@@ -174,6 +176,7 @@ jobs:
       environment: staging
       service_name: price-alert-service
       namespace: notification
+      cluster_name: staging-cluster
       image_tag: ${{ github.sha }}
     secrets: inherit
 
@@ -183,7 +186,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      workflow_name: "Price Alert Service CI"
       service_name: price-alert-service
       environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

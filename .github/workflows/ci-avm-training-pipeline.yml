@@ -227,9 +227,11 @@ jobs:
     needs: model-evaluation
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service_dir: services/data/avm-training-pipeline
-      image_name: avm-training-pipeline
-      dockerfile: services/data/avm-training-pipeline/Dockerfile
+      service_name: avm-training-pipeline
+      ecr_repository: avm-training-pipeline
+      dockerfile_path: services/data/avm-training-pipeline/Dockerfile
+      image_tag: ${{ github.sha }}
+      push_image: true
     secrets: inherit
 
   notify:
@@ -238,7 +240,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      workflow_name: "AVM Training Pipeline CI"
       service_name: avm-training-pipeline
-      environment: dev
+      environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

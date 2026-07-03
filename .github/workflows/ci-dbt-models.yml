@@ -4,14 +4,13 @@ on:
   push:
     branches: [main, develop]
     paths:
-    - "services/data/dbt-models/**"
-    - ".github/workflows/ci-dbt-models.yml"
+      - "services/data/dbt-models/**"
+      - ".github/workflows/ci-dbt-models.yml"
   pull_request:
     branches: [main, develop]
     paths:
-    - "services/data/dbt-models/**"
-    - ".github/workflows/ci-dbt-models.yml"
-
+      - "services/data/dbt-models/**"
+      - ".github/workflows/ci-dbt-models.yml"
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
@@ -26,147 +25,147 @@ jobs:
     name: dbt Parse & Validate
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Cache pip dependencies
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('services/data/dbt-models/requirements*.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/dbt-models/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-    - name: Install dbt and dependencies
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: pip install dbt-core dbt-snowflake dbt-redshift pyyaml jsonschema
+      - name: Install dbt and dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install dbt-core dbt-snowflake dbt-redshift pyyaml jsonschema
 
-    - name: Validate dbt project YAML files
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: python scripts/validate_yaml.py --dir models/
+      - name: Validate dbt project YAML files
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: python scripts/validate_yaml.py --dir models/
 
-    - name: Run dbt parse
-      working-directory: ${{ env.SERVICE_DIR }}
-      env:
-        DBT_TARGET: dev
-        SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-        SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_CI_USER }}
-        SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_CI_PASSWORD }}
-        SNOWFLAKE_WAREHOUSE: CI_WAREHOUSE
-        SNOWFLAKE_DATABASE: REAL_ESTATE_DEV
-        SNOWFLAKE_SCHEMA: DBT_CI_${{ github.run_id }}
-      run: dbt parse --profiles-dir ${{ env.DBT_PROFILES_DIR }} --target dev
+      - name: Run dbt parse
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          DBT_TARGET: dev
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_CI_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_CI_PASSWORD }}
+          SNOWFLAKE_WAREHOUSE: CI_WAREHOUSE
+          SNOWFLAKE_DATABASE: REAL_ESTATE_DEV
+          SNOWFLAKE_SCHEMA: DBT_CI_${{ github.run_id }}
+        run: dbt parse --profiles-dir ${{ env.DBT_PROFILES_DIR }} --target dev
 
   dbt-test:
     name: dbt Test Modified Models
     runs-on: ubuntu-latest
     needs: dbt-parse
     steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Cache pip dependencies
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('services/data/dbt-models/requirements*.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/dbt-models/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-    - name: Install dbt and dependencies
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: pip install dbt-core dbt-snowflake
+      - name: Install dbt and dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install dbt-core dbt-snowflake
 
-    - name: Run dbt test on modified models
-      working-directory: ${{ env.SERVICE_DIR }}
-      env:
-        DBT_TARGET: dev
-        SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-        SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_CI_USER }}
-        SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_CI_PASSWORD }}
-        SNOWFLAKE_WAREHOUSE: CI_WAREHOUSE
-        SNOWFLAKE_DATABASE: REAL_ESTATE_DEV
-        SNOWFLAKE_SCHEMA: DBT_CI_${{ github.run_id }}
-      run: |
-        dbt test \
-          --profiles-dir ${{ env.DBT_PROFILES_DIR }} \
-          --target dev \
-          --select state:modified+ \
-          --defer \
-          --state logs/
+      - name: Run dbt test on modified models
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          DBT_TARGET: dev
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_CI_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_CI_PASSWORD }}
+          SNOWFLAKE_WAREHOUSE: CI_WAREHOUSE
+          SNOWFLAKE_DATABASE: REAL_ESTATE_DEV
+          SNOWFLAKE_SCHEMA: DBT_CI_${{ github.run_id }}
+        run: |
+          dbt test \
+            --profiles-dir ${{ env.DBT_PROFILES_DIR }} \
+            --target dev \
+            --select state:modified+ \
+            --defer \
+            --state logs/
 
   dbt-run-dev:
     name: dbt Run Dev Target
     runs-on: ubuntu-latest
     needs: dbt-test
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Install dbt
-      run: pip install dbt-core dbt-snowflake
+      - name: Install dbt
+        run: pip install dbt-core dbt-snowflake
 
-    - name: Run dbt models on dev
-      working-directory: ${{ env.SERVICE_DIR }}
-      env:
-        DBT_TARGET: dev
-        SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-        SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_CI_USER }}
-        SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_CI_PASSWORD }}
-        SNOWFLAKE_WAREHOUSE: CI_WAREHOUSE
-        SNOWFLAKE_DATABASE: REAL_ESTATE_DEV
-        SNOWFLAKE_SCHEMA: DBT_CI_${{ github.run_id }}
-      run: |
-        dbt run \
-          --profiles-dir ${{ env.DBT_PROFILES_DIR }} \
-          --target dev \
-          --select state:modified+ \
-          --defer \
-          --state logs/
+      - name: Run dbt models on dev
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          DBT_TARGET: dev
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_CI_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_CI_PASSWORD }}
+          SNOWFLAKE_WAREHOUSE: CI_WAREHOUSE
+          SNOWFLAKE_DATABASE: REAL_ESTATE_DEV
+          SNOWFLAKE_SCHEMA: DBT_CI_${{ github.run_id }}
+        run: |
+          dbt run \
+            --profiles-dir ${{ env.DBT_PROFILES_DIR }} \
+            --target dev \
+            --select state:modified+ \
+            --defer \
+            --state logs/
 
-    - name: Upload dbt artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: dbt-run-artifacts
-        path: ${{ env.SERVICE_DIR }}/target/
+      - name: Upload dbt artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-run-artifacts
+          path: ${{ env.SERVICE_DIR }}/target/
 
   data-quality:
     name: Great Expectations Data Quality
     runs-on: ubuntu-latest
     needs: dbt-run-dev
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Install Great Expectations
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: pip install great-expectations sqlalchemy snowflake-sqlalchemy
+      - name: Install Great Expectations
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install great-expectations sqlalchemy snowflake-sqlalchemy
 
-    - name: Run Great Expectations checkpoint
-      working-directory: ${{ env.SERVICE_DIR }}
-      env:
-        SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-        SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_CI_USER }}
-        SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_CI_PASSWORD }}
-      run: great_expectations checkpoint run listing_data_quality_checkpoint
+      - name: Run Great Expectations checkpoint
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_CI_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_CI_PASSWORD }}
+        run: great_expectations checkpoint run listing_data_quality_checkpoint
 
   dbt-docs:
     name: Generate & Publish dbt Docs
@@ -174,31 +173,31 @@ jobs:
     needs: dbt-run-dev
     if: github.ref == 'refs/heads/develop'
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Install dbt and AWS CLI
-      run: pip install dbt-core dbt-snowflake awscli
+      - name: Install dbt and AWS CLI
+        run: pip install dbt-core dbt-snowflake awscli
 
-    - name: Generate dbt docs
-      working-directory: ${{ env.SERVICE_DIR }}
-      env:
-        SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-        SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_CI_USER }}
-        SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_CI_PASSWORD }}
-      run: dbt docs generate --profiles-dir ${{ env.DBT_PROFILES_DIR }} --target dev
+      - name: Generate dbt docs
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_CI_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_CI_PASSWORD }}
+        run: dbt docs generate --profiles-dir ${{ env.DBT_PROFILES_DIR }} --target dev
 
-    - name: Upload dbt docs to S3
-      working-directory: ${{ env.SERVICE_DIR }}/target
-      env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        AWS_DEFAULT_REGION: us-east-1
-      run: aws s3 sync . s3://${{ secrets.DBT_DOCS_BUCKET }}/latest/ --delete
+      - name: Upload dbt docs to S3
+        working-directory: ${{ env.SERVICE_DIR }}/target
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: aws s3 sync . s3://${{ secrets.DBT_DOCS_BUCKET }}/latest/ --delete
 
   security-scan:
     name: Security Scan

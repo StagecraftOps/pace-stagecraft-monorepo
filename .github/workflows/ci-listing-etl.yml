@@ -4,14 +4,13 @@ on:
   push:
     branches: [main, develop]
     paths:
-    - "services/data/listing-etl/**"
-    - ".github/workflows/ci-listing-etl.yml"
+      - "services/data/listing-etl/**"
+      - ".github/workflows/ci-listing-etl.yml"
   pull_request:
     branches: [main, develop]
     paths:
-    - "services/data/listing-etl/**"
-    - ".github/workflows/ci-listing-etl.yml"
-
+      - "services/data/listing-etl/**"
+      - ".github/workflows/ci-listing-etl.yml"
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
@@ -26,80 +25,80 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Cache pip dependencies
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('services/data/listing-etl/requirements*.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/listing-etl/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-    - name: Install lint dependencies
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: pip install flake8 black isort mypy
+      - name: Install lint dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install flake8 black isort mypy
 
-    - name: Run flake8
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: flake8 src/ --max-line-length=120 --extend-ignore=E203
+      - name: Run flake8
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: flake8 src/ --max-line-length=120 --extend-ignore=E203
 
-    - name: Check black formatting
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: black --check src/
+      - name: Check black formatting
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: black --check src/
 
-    - name: Check import ordering with isort
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: isort --check-only src/
+      - name: Check import ordering with isort
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: isort --check-only src/
 
-    - name: Run mypy type checks
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: mypy src/ --ignore-missing-imports
+      - name: Run mypy type checks
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: mypy src/ --ignore-missing-imports
 
   unit-test:
     name: Unit Tests
     runs-on: ubuntu-latest
     needs: lint
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Cache pip dependencies
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('services/data/listing-etl/requirements*.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/listing-etl/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-    - name: Install dependencies
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install -r requirements.txt -r requirements-dev.txt
 
-    - name: Run pytest with coverage
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: |
-        pytest tests/unit/ \
-          --cov=src \
-          --cov-report=xml \
-          --cov-report=term-missing \
-          --cov-fail-under=80 \
-          -v
+      - name: Run pytest with coverage
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          pytest tests/unit/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=80 \
+            -v
 
-    - name: Upload coverage report
-      uses: actions/upload-artifact@v4
-      with:
-        name: listing-etl-coverage
-        path: ${{ env.SERVICE_DIR }}/coverage.xml
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: listing-etl-coverage
+          path: ${{ env.SERVICE_DIR }}/coverage.xml
 
   integration-test:
     name: Integration Tests

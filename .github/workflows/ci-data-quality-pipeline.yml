@@ -4,14 +4,13 @@ on:
   push:
     branches: [main, develop]
     paths:
-    - "services/data/data-quality-pipeline/**"
-    - ".github/workflows/ci-data-quality-pipeline.yml"
+      - "services/data/data-quality-pipeline/**"
+      - ".github/workflows/ci-data-quality-pipeline.yml"
   pull_request:
     branches: [main, develop]
     paths:
-    - "services/data/data-quality-pipeline/**"
-    - ".github/workflows/ci-data-quality-pipeline.yml"
-
+      - "services/data/data-quality-pipeline/**"
+      - ".github/workflows/ci-data-quality-pipeline.yml"
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
@@ -26,86 +25,86 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Cache pip dependencies
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('services/data/data-quality-pipeline/requirements*.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/data-quality-pipeline/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-    - name: Install lint tools
-      run: pip install flake8 black isort pylint bandit
+      - name: Install lint tools
+        run: pip install flake8 black isort pylint bandit
 
-    - name: Run flake8
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: flake8 src/ --max-line-length=120 --extend-ignore=E203,W503
+      - name: Run flake8
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: flake8 src/ --max-line-length=120 --extend-ignore=E203,W503
 
-    - name: Check black formatting
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: black --check src/
+      - name: Check black formatting
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: black --check src/
 
-    - name: Check import ordering
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: isort --check-only --diff src/
+      - name: Check import ordering
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: isort --check-only --diff src/
 
-    - name: Run bandit security linting
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: bandit -r src/ -ll --exclude src/tests/
+      - name: Run bandit security linting
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: bandit -r src/ -ll --exclude src/tests/
 
   unit-test:
     name: Unit Tests
     runs-on: ubuntu-latest
     needs: lint
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Cache pip dependencies
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('services/data/data-quality-pipeline/requirements*.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/data-quality-pipeline/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-    - name: Install dependencies
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install -r requirements.txt -r requirements-dev.txt
 
-    - name: Run Great Expectations suite tests
-      working-directory: ${{ env.SERVICE_DIR }}
-      env:
-        ENVIRONMENT: test
-        GE_USAGE_STATISTICS_URL: ""
-      run: |
-        pytest tests/unit/ \
-          --cov=src \
-          --cov-report=xml \
-          --cov-report=term-missing \
-          --cov-fail-under=82 \
-          -v --tb=short
+      - name: Run Great Expectations suite tests
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          ENVIRONMENT: test
+          GE_USAGE_STATISTICS_URL: ""
+        run: |
+          pytest tests/unit/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=82 \
+            -v --tb=short
 
-    - name: Validate expectation suite JSON files
-      working-directory: ${{ env.SERVICE_DIR }}
-      run: python scripts/validate_expectation_suites.py --dir expectations/
+      - name: Validate expectation suite JSON files
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: python scripts/validate_expectation_suites.py --dir expectations/
 
-    - name: Upload coverage report
-      uses: actions/upload-artifact@v4
-      with:
-        name: data-quality-coverage
-        path: ${{ env.SERVICE_DIR }}/coverage.xml
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-quality-coverage
+          path: ${{ env.SERVICE_DIR }}/coverage.xml
 
   integration-test:
     name: Integration Tests

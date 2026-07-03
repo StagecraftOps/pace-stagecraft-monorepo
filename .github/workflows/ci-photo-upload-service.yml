@@ -153,10 +153,10 @@ jobs:
     needs: s3-policy-validation
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service-name: photo-upload-service
-      dockerfile-path: services/media/photo-upload-service/Dockerfile
-      context-path: services/media/photo-upload-service
-      image-tag: ${{ github.sha }}
+      service_name: photo-upload-service
+      ecr_repository: photo-upload-service
+      dockerfile_path: services/media/photo-upload-service/Dockerfile
+      image_tag: ${{ github.sha }}
     secrets: inherit
 
   integration-test:
@@ -164,10 +164,9 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service-name: photo-upload-service
-      service-dir: services/media/photo-upload-service
-      compose-file: services/media/photo-upload-service/docker-compose.test.yml
-      test-command: "npm run test:integration"
+      service_name: photo-upload-service
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   deploy-staging:
@@ -176,11 +175,11 @@ jobs:
     if: github.ref == 'refs/heads/develop'
     uses: ./.github/workflows/_template-deploy-k8s.yml
     with:
-      service-name: photo-upload-service
+      service_name: photo-upload-service
       environment: staging
-      image-tag: ${{ github.sha }}
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-cluster
       namespace: media-staging
-      helm-values-file: services/media/photo-upload-service/helm/values-staging.yaml
     secrets: inherit
 
   notify:
@@ -189,7 +188,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      service-name: photo-upload-service
-      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
-      channel: "#media-ci"
+      service_name: photo-upload-service
+      environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

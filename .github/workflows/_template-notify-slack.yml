@@ -23,7 +23,7 @@ on:
       triggered_by:
         required: false
         type: string
-        default: ${{ github.actor }}
+        default: ""
     secrets:
       SLACK_WEBHOOK_URL:
         required: false

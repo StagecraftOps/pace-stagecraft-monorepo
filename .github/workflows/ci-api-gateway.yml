@@ -161,10 +161,10 @@ jobs:
     needs: rate-limit-test
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service-name: api-gateway
-      dockerfile-path: services/infra/api-gateway/Dockerfile
-      context-path: services/infra/api-gateway
-      image-tag: ${{ github.sha }}
+      service_name: api-gateway
+      ecr_repository: api-gateway
+      dockerfile_path: services/infra/api-gateway/Dockerfile
+      image_tag: ${{ github.sha }}
     secrets: inherit
 
   integration-test:
@@ -172,10 +172,9 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service-name: api-gateway
-      service-dir: services/infra/api-gateway
-      compose-file: services/infra/api-gateway/docker-compose.test.yml
-      test-command: "go test -v -timeout 300s ./tests/integration/..."
+      service_name: api-gateway
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   e2e-test:
@@ -183,11 +182,8 @@ jobs:
     needs: integration-test
     uses: ./.github/workflows/_template-e2e-test.yml
     with:
-      service-name: api-gateway
-      service-dir: services/infra/api-gateway
-      compose-file: services/infra/api-gateway/docker-compose.e2e.yml
-      test-command: "go test -v -timeout 600s ./tests/e2e/..."
-      environment: test
+      service_name: api-gateway
+      base_url: "https://api.staging.internal"
     secrets: inherit
 
   deploy-staging:
@@ -196,11 +192,11 @@ jobs:
     if: github.ref == 'refs/heads/develop'
     uses: ./.github/workflows/_template-deploy-k8s.yml
     with:
-      service-name: api-gateway
+      service_name: api-gateway
       environment: staging
-      image-tag: ${{ github.sha }}
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-cluster
       namespace: infra-staging
-      helm-values-file: services/infra/api-gateway/helm/values-staging.yaml
     secrets: inherit
 
   notify:
@@ -209,7 +205,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      service-name: api-gateway
-      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
-      channel: "#infra-ci"
+      service_name: api-gateway
+      environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

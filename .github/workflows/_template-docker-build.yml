@@ -16,7 +16,7 @@ on:
       image_tag:
         required: false
         type: string
-        default: ${{ github.sha }}
+        default: ""
       push_image:
         required: false
         type: boolean

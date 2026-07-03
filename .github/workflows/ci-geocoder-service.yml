@@ -151,10 +151,10 @@ jobs:
     needs: geocoding-accuracy-test
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service-name: geocoder-service
-      dockerfile-path: services/geo/geocoder-service/Dockerfile
-      context-path: services/geo/geocoder-service
-      image-tag: ${{ github.sha }}
+      service_name: geocoder-service
+      ecr_repository: geocoder-service
+      dockerfile_path: services/geo/geocoder-service/Dockerfile
+      image_tag: ${{ github.sha }}
     secrets: inherit
 
   integration-test:
@@ -162,10 +162,9 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service-name: geocoder-service
-      service-dir: services/geo/geocoder-service
-      compose-file: services/geo/geocoder-service/docker-compose.test.yml
-      test-command: "go test -v -timeout 300s ./tests/integration/..."
+      service_name: geocoder-service
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   deploy-staging:
@@ -174,11 +173,11 @@ jobs:
     if: github.ref == 'refs/heads/develop'
     uses: ./.github/workflows/_template-deploy-k8s.yml
     with:
-      service-name: geocoder-service
+      service_name: geocoder-service
       environment: staging
-      image-tag: ${{ github.sha }}
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-cluster
       namespace: geo-staging
-      helm-values-file: services/geo/geocoder-service/helm/values-staging.yaml
     secrets: inherit
 
   notify:
@@ -187,7 +186,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      service-name: geocoder-service
-      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
-      channel: "#geo-ci"
+      service_name: geocoder-service
+      environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

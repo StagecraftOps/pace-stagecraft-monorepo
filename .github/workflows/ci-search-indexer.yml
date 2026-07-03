@@ -168,10 +168,10 @@ jobs:
     needs: index-schema-validation
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service-name: search-indexer
-      dockerfile-path: services/search/search-indexer/Dockerfile
-      context-path: services/search/search-indexer
-      image-tag: ${{ github.sha }}
+      service_name: search-indexer
+      ecr_repository: search-indexer
+      dockerfile_path: services/search/search-indexer/Dockerfile
+      image_tag: ${{ github.sha }}
     secrets: inherit
 
   integration-test:
@@ -179,10 +179,9 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service-name: search-indexer
-      service-dir: services/search/search-indexer
-      compose-file: services/search/search-indexer/docker-compose.test.yml
-      test-command: "pytest tests/integration -v --timeout=180"
+      service_name: search-indexer
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   deploy-staging:
@@ -191,11 +190,11 @@ jobs:
     if: github.ref == 'refs/heads/develop'
     uses: ./.github/workflows/_template-deploy-k8s.yml
     with:
-      service-name: search-indexer
+      service_name: search-indexer
       environment: staging
-      image-tag: ${{ github.sha }}
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-cluster
       namespace: search-staging
-      helm-values-file: services/search/search-indexer/helm/values-staging.yaml
     secrets: inherit
 
   notify:
@@ -204,7 +203,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      service-name: search-indexer
-      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
-      channel: "#search-ci"
+      service_name: search-indexer
+      environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

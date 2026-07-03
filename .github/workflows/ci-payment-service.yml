@@ -155,10 +155,10 @@ jobs:
     needs: pci-compliance-check
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service-name: payment-service
-      dockerfile-path: services/payment/payment-service/Dockerfile
-      context-path: services/payment/payment-service
-      image-tag: ${{ github.sha }}
+      service_name: payment-service
+      ecr_repository: payment-service
+      dockerfile_path: services/payment/payment-service/Dockerfile
+      image_tag: ${{ github.sha }}
     secrets: inherit
 
   integration-test:
@@ -166,10 +166,9 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service-name: payment-service
-      service-dir: services/payment/payment-service
-      compose-file: services/payment/payment-service/docker-compose.test.yml
-      test-command: "pytest tests/integration -v --timeout=120"
+      service_name: payment-service
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   deploy-staging:
@@ -178,11 +177,11 @@ jobs:
     if: github.ref == 'refs/heads/develop'
     uses: ./.github/workflows/_template-deploy-k8s.yml
     with:
-      service-name: payment-service
+      service_name: payment-service
       environment: staging
-      image-tag: ${{ github.sha }}
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-cluster
       namespace: payments-staging
-      helm-values-file: services/payment/payment-service/helm/values-staging.yaml
     secrets: inherit
 
   notify:
@@ -191,7 +190,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      service-name: payment-service
-      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
-      channel: "#payments-ci"
+      service_name: payment-service
+      environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

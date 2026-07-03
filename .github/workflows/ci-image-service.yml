@@ -156,10 +156,10 @@ jobs:
     needs: image-processing-test
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service-name: image-service
-      dockerfile-path: services/media/image-service/Dockerfile
-      context-path: services/media/image-service
-      image-tag: ${{ github.sha }}
+      service_name: image-service
+      ecr_repository: image-service
+      dockerfile_path: services/media/image-service/Dockerfile
+      image_tag: ${{ github.sha }}
     secrets: inherit
 
   integration-test:
@@ -167,10 +167,9 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service-name: image-service
-      service-dir: services/media/image-service
-      compose-file: services/media/image-service/docker-compose.test.yml
-      test-command: "go test -v -timeout 300s ./tests/integration/..."
+      service_name: image-service
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   deploy-staging:
@@ -179,11 +178,11 @@ jobs:
     if: github.ref == 'refs/heads/develop'
     uses: ./.github/workflows/_template-deploy-k8s.yml
     with:
-      service-name: image-service
+      service_name: image-service
       environment: staging
-      image-tag: ${{ github.sha }}
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-cluster
       namespace: media-staging
-      helm-values-file: services/media/image-service/helm/values-staging.yaml
     secrets: inherit
 
   notify:
@@ -192,7 +191,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      service-name: image-service
-      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
-      channel: "#media-ci"
+      service_name: image-service
+      environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

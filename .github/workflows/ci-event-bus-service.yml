@@ -179,10 +179,10 @@ jobs:
     needs: schema-registry-sync
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service-name: event-bus-service
-      dockerfile-path: services/infra/event-bus-service/Dockerfile
-      context-path: services/infra/event-bus-service
-      image-tag: ${{ github.sha }}
+      service_name: event-bus-service
+      ecr_repository: event-bus-service
+      dockerfile_path: services/infra/event-bus-service/Dockerfile
+      image_tag: ${{ github.sha }}
     secrets: inherit
 
   integration-test:
@@ -190,10 +190,9 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service-name: event-bus-service
-      service-dir: services/infra/event-bus-service
-      compose-file: services/infra/event-bus-service/docker-compose.test.yml
-      test-command: "go test -v -timeout 300s ./tests/integration/..."
+      service_name: event-bus-service
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   deploy-staging:
@@ -202,11 +201,11 @@ jobs:
     if: github.ref == 'refs/heads/develop'
     uses: ./.github/workflows/_template-deploy-k8s.yml
     with:
-      service-name: event-bus-service
+      service_name: event-bus-service
       environment: staging
-      image-tag: ${{ github.sha }}
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-cluster
       namespace: infra-staging
-      helm-values-file: services/infra/event-bus-service/helm/values-staging.yaml
     secrets: inherit
 
   notify:
@@ -215,7 +214,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      service-name: event-bus-service
-      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
-      channel: "#infra-ci"
+      service_name: event-bus-service
+      environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

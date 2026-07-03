@@ -179,10 +179,10 @@ jobs:
     needs: embedding-quality-check
     uses: ./.github/workflows/_template-docker-build.yml
     with:
-      service-name: semantic-search-service
-      dockerfile-path: services/search/semantic-search-service/Dockerfile
-      context-path: services/search/semantic-search-service
-      image-tag: ${{ github.sha }}
+      service_name: semantic-search-service
+      ecr_repository: semantic-search-service
+      dockerfile_path: services/search/semantic-search-service/Dockerfile
+      image_tag: ${{ github.sha }}
     secrets: inherit
 
   integration-test:
@@ -190,10 +190,9 @@ jobs:
     needs: docker-build
     uses: ./.github/workflows/_template-integration-test.yml
     with:
-      service-name: semantic-search-service
-      service-dir: services/search/semantic-search-service
-      compose-file: services/search/semantic-search-service/docker-compose.test.yml
-      test-command: "pytest tests/integration -v --timeout=240"
+      service_name: semantic-search-service
+      test_suite: integration
+      test_timeout_minutes: 30
     secrets: inherit
 
   deploy-staging:
@@ -202,11 +201,11 @@ jobs:
     if: github.ref == 'refs/heads/develop'
     uses: ./.github/workflows/_template-deploy-k8s.yml
     with:
-      service-name: semantic-search-service
+      service_name: semantic-search-service
       environment: staging
-      image-tag: ${{ github.sha }}
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-cluster
       namespace: search-staging
-      helm-values-file: services/search/semantic-search-service/helm/values-staging.yaml
     secrets: inherit
 
   notify:
@@ -215,7 +214,8 @@ jobs:
     if: always()
     uses: ./.github/workflows/_template-notify-slack.yml
     with:
-      service-name: semantic-search-service
-      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
-      channel: "#search-ci"
+      service_name: semantic-search-service
+      environment: staging
+      status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      triggered_by: ${{ github.actor }}
     secrets: inherit

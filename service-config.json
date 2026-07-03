@@ -1,0 +1,13 @@
+{
+  "_comment": "Optional per-service CI configuration. Services not listed here fall back to auto-detection from project files (package.json, requirements.txt, go.mod, pom.xml, build.gradle). Keys must match the service folder name exactly.",
+
+  "walkscore-pipeline":   { "runtime": "python", "test": false, "build": false },
+  "natural-language-search": { "runtime": "python", "test": true },
+  "zestimate-service":    { "runtime": "python", "test": true },
+
+  "typeahead-service":    { "runtime": "go",     "test": true,  "build": true },
+  "timezone-service":     { "runtime": "go",     "test": true },
+
+  "synonym-service":      { "runtime": "node",   "test": true,  "build": true },
+  "webhook-service":      { "runtime": "node",   "test": true,  "build": true }
+}

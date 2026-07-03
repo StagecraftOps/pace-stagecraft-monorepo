@@ -1,0 +1,184 @@
+name: "CI — document-service"
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "services/backend/document-service/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/backend/document-service/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-document-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  SERVICE_DIR: services/backend/document-service
+
+jobs:
+  lint-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: document-${{ hashFiles('services/backend/document-service/requirements*.txt') }}
+          restore-keys: |
+            document-pip-
+
+      - name: Install dependencies
+        working-directory: services/backend/document-service
+        run: pip install -e ".[dev]"
+
+      - name: Run ruff linter
+        working-directory: services/backend/document-service
+        run: ruff check . --output-format=github
+
+      - name: Run mypy type checker
+        working-directory: services/backend/document-service
+        run: mypy app/ --ignore-missing-imports
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: lint-typecheck
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: document-${{ hashFiles('services/backend/document-service/requirements*.txt') }}
+          restore-keys: |
+            document-pip-
+
+      - name: Install dependencies
+        working-directory: services/backend/document-service
+        run: pip install -e ".[dev]"
+
+      - name: Run unit tests with 85% coverage threshold
+        working-directory: services/backend/document-service
+        run: pytest tests/unit/ -v --cov=app --cov-report=xml --cov-report=html --cov-fail-under=85 -x
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: document-service-coverage
+          path: |
+            services/backend/document-service/coverage.xml
+            services/backend/document-service/htmlcov/
+
+  virus-scan-test:
+    runs-on: ubuntu-latest
+    needs: lint-typecheck
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: document-${{ hashFiles('services/backend/document-service/requirements*.txt') }}
+          restore-keys: |
+            document-pip-
+
+      - name: Install dependencies
+        working-directory: services/backend/document-service
+        run: pip install -e ".[dev]"
+
+      - name: Pull and start ClamAV container
+        run: |
+          docker pull clamav/clamav:latest
+          docker run -d --name clamav-test -p 3310:3310 clamav/clamav:latest
+
+      - name: Wait for ClamAV to update virus definitions
+        run: |
+          echo "Waiting 30 seconds for ClamAV to update virus definitions..."
+          sleep 30
+          docker logs clamav-test | tail -20
+
+      - name: Run virus scanning integration tests
+        working-directory: services/backend/document-service
+        env:
+          CLAMAV_HOST: localhost
+          CLAMAV_PORT: "3310"
+        run: pytest tests/virus_scan/ -v --tb=short
+
+      - name: Tear down ClamAV container
+        if: always()
+        run: docker rm -f clamav-test
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: document-virus-scan-results
+          path: services/backend/document-service/virus-scan-test-results.xml
+
+  security-scan:
+    needs: lint-typecheck
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: document-service
+      working_directory: services/backend/document-service
+      severity_threshold: HIGH
+    secrets: inherit
+
+  build:
+    needs: [unit-test, virus-scan-test]
+    uses: ./.github/workflows/_template-python-ci.yml
+    with:
+      service_name: document-service
+      python_version: "3.11"
+      working_directory: services/backend/document-service
+      run_integration: false
+    secrets: inherit
+
+  docker-build:
+    needs: [build, security-scan]
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: document-service
+      dockerfile_path: services/backend/document-service/Dockerfile
+      ecr_repository: stagecraft/document-service
+      image_tag: ${{ github.sha }}
+      push_image: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  integration-test:
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: document-service
+      test_suite: document-lifecycle
+      environment_url: http://localhost:8027
+      test_timeout_minutes: 25
+    secrets: inherit
+
+  deploy-staging:
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: document-service
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: backend
+      helm_chart_path: charts/document-service
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

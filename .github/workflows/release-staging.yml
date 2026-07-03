@@ -1,0 +1,139 @@
+name: "Release: Staging"
+
+on:
+  push:
+    branches:
+      - develop
+  workflow_dispatch:
+
+concurrency:
+  group: release-staging
+  cancel-in-progress: true
+
+jobs:
+  detect-changes:
+    name: "Detect Changed Services"
+    runs-on: ubuntu-latest
+    outputs:
+      changed_services: ${{ steps.changes.outputs.services }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed service directories
+        id: changes
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD \
+            | grep "^services/" \
+            | awk -F/ '{print $2}' \
+            | sort -u \
+            | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "services=$CHANGED" >> $GITHUB_OUTPUT
+          echo "Changed services: $CHANGED"
+
+  build-changed-images:
+    name: "Build Docker Images"
+    needs: detect-changes
+    if: needs.detect-changes.outputs.changed_services != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJson(needs.detect-changes.outputs.changed_services) }}
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: ${{ matrix.service }}
+      ecr_repository: ${{ matrix.service }}
+      image_tag: "staging-${{ github.sha }}"
+      push_image: true
+    secrets: inherit
+
+  deploy-to-staging:
+    name: "Deploy to Staging"
+    needs: build-changed-images
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: "all-changed-services"
+      image_tag: "staging-${{ github.sha }}"
+      cluster_name: "staging-eks-cluster"
+      namespace: "staging"
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit
+
+  run-staging-integration-tests:
+    name: "Staging Integration Tests"
+    needs: deploy-to-staging
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: "staging-platform"
+      test_suite: "integration"
+      environment_url: "https://staging.zillow.com"
+      test_timeout_minutes: 45
+    secrets: inherit
+
+  run-e2e-tests:
+    name: "Staging E2E Tests"
+    needs: deploy-to-staging
+    uses: ./.github/workflows/_template-e2e-test.yml
+    with:
+      service_name: "staging-platform"
+      base_url: "https://staging.zillow.com"
+      browser_list: "chromium,firefox"
+    secrets: inherit
+
+  performance-baseline:
+    name: "Performance Baseline (k6)"
+    needs: deploy-to-staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Run k6 load test baseline
+        run: |
+          k6 run \
+            --vus=100 \
+            --duration=5m \
+            --out=json=k6-results.json \
+            --summary-export=k6-summary.json \
+            tests/performance/staging-baseline.js
+        env:
+          K6_BASE_URL: https://staging.zillow.com
+
+      - name: Evaluate performance thresholds
+        run: |
+          P95=$(cat k6-summary.json | jq -r '.metrics["http_req_duration"]["values"]["p(95)"]')
+          echo "p95 latency: ${P95}ms"
+          if (( $(echo "$P95 > 500" | bc -l) )); then
+            echo "WARNING: p95 latency ${P95}ms exceeds 500ms baseline threshold"
+          fi
+
+      - name: Upload k6 results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: k6-staging-baseline-${{ github.sha }}
+          path: |
+            k6-results.json
+            k6-summary.json
+          retention-days: 30
+
+  notify-team:
+    name: "Notify Engineering Team"
+    needs: [run-staging-integration-tests, run-e2e-tests, performance-baseline]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service_name: "Staging Platform"
+      environment: staging
+      status: ${{ (needs.run-staging-integration-tests.result == 'success' && needs.run-e2e-tests.result == 'success') && 'SUCCESS' || 'FAILURE' }}
+      image_tag: "staging-${{ github.sha }}"
+      deploy_url: "https://staging.zillow.com"
+      triggered_by: ${{ github.actor }}
+    secrets: inherit

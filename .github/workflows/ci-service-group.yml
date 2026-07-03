@@ -1,0 +1,160 @@
+# =============================================================================
+# CI SERVICE GROUP  ·  Reusable Child Workflow
+# =============================================================================
+#
+#  Called by ci-orchestrator.yml — once per service group.
+#
+#  INPUTS  (passed from the parent)
+#  ────────────────────────────────
+#    group     e.g. "backend"
+#    services  JSON array  e.g. '["listing-service","agent-service",…]'
+#    sha       commit SHA (used for cache key)
+#
+#  WHY A SEPARATE REUSABLE WORKFLOW (workflow_call)?
+#  ─────────────────────────────────────────────────
+#  When the parent calls  uses: ./.github/workflows/ci-service-group.yml
+#  GitHub spins up an entirely INDEPENDENT workflow run.  That run gets its
+#  OWN 256-job matrix budget.  This is the key insight that breaks the limit:
+#
+#    Parent  →  13  matrix entries  (one per group)           ≤ 256 ✅
+#    Child   →  up to ~120 entries  (backend group)           ≤ 256 ✅
+#    Total   →  13 × 256 = 3,328 possible concurrent jobs         ✅
+#
+#  STAGES IN THIS CHILD
+#  ─────────────────────
+#    test   → Install deps + run Jest  (matrix per service)
+#    build  → npm run build            (matrix per service, runs after test)
+#
+# =============================================================================
+
+name: "CI — Service Group (Child)"
+
+on:
+  workflow_call:
+    inputs:
+      group:
+        required: true
+        type: string
+        description: "Service group folder (e.g. backend)"
+      services:
+        required: true
+        type: string
+        description: "JSON array of service names in this group"
+      sha:
+        required: true
+        type: string
+        description: "Git commit SHA (used as shared-cache key)"
+
+env:
+  NODE_VERSION: "20"
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 1 · TEST  (parallel per service)
+  # ═══════════════════════════════════════════════════════════════════════════
+  test:
+    name: "🧪 Test · ${{ inputs.group }}/${{ matrix.service }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJson(inputs.services) }}   # ← child's own matrix
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: |
+            package-lock.json
+            services/${{ inputs.group }}/${{ matrix.service }}/package-lock.json
+
+      - name: Restore shared packages
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            packages/shared-types/dist
+            packages/shared-utils/dist
+          key: shared-build-${{ inputs.sha }}
+
+      - name: Install dependencies
+        working-directory: services/${{ inputs.group }}/${{ matrix.service }}
+        run: npm ci --prefer-offline --ignore-scripts
+
+      - name: Run unit tests
+        working-directory: services/${{ inputs.group }}/${{ matrix.service }}
+        run: |
+          if [ -f "jest.config.js" ] || [ -f "jest.config.ts" ] || grep -q '"jest"' package.json 2>/dev/null; then
+            npx jest --ci --coverage --passWithNoTests --coverageReporters=text-summary
+          else
+            echo "No Jest config found — skipping tests for ${{ matrix.service }}"
+          fi
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ inputs.group }}-${{ matrix.service }}
+          path: services/${{ inputs.group }}/${{ matrix.service }}/coverage
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 2 · BUILD  (parallel per service, runs after test)
+  # ═══════════════════════════════════════════════════════════════════════════
+  build:
+    name: "🔨 Build · ${{ inputs.group }}/${{ matrix.service }}"
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJson(inputs.services) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: |
+            package-lock.json
+            services/${{ inputs.group }}/${{ matrix.service }}/package-lock.json
+
+      - name: Restore shared packages
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            packages/shared-types/dist
+            packages/shared-utils/dist
+          key: shared-build-${{ inputs.sha }}
+
+      - name: Install dependencies
+        working-directory: services/${{ inputs.group }}/${{ matrix.service }}
+        run: npm ci --prefer-offline --ignore-scripts
+
+      - name: Build service
+        working-directory: services/${{ inputs.group }}/${{ matrix.service }}
+        run: |
+          if grep -q '"build"' package.json 2>/dev/null; then
+            npm run build
+          else
+            echo "No build script — skipping build for ${{ matrix.service }}"
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ inputs.group }}-${{ matrix.service }}-${{ inputs.sha }}
+          path: services/${{ inputs.group }}/${{ matrix.service }}/dist
+          retention-days: 3
+          if-no-files-found: ignore

@@ -1,0 +1,283 @@
+# =============================================================================
+# Orchestrator — Dependency-Aware Service Execution Order
+# =============================================================================
+# Defines inter-service dependencies for the CI pipeline.
+# Services listed here are sorted into layers via Kahn's Algorithm
+# (topological sort) before execution. Same-layer services run in parallel.
+#
+# Services NOT listed here are auto-detected by the CI and assigned to layer 0.
+#
+# Format:
+#   services:
+#     domain/service-name:
+#       depends_on: ["domain/other-service"]
+#
+# Rules:
+#   - depends_on lists services that MUST complete before this one
+#   - A service with no depends_on goes to layer 0 (first to run)
+#   - Circular dependencies are detected and safely flattened
+# =============================================================================
+
+services:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # LAYER 0 — Foundational services (no dependencies)
+  #           These boot first. All other services depend on them.
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # ── Infra foundations ──
+  infra/api-gateway: {}
+  infra/cache-service: {}
+  infra/service-discovery: {}
+  infra/service-mesh-config: {}
+
+  # ── Core backend ──
+  backend/config-service: {}
+  backend/health-check-service: {}
+  backend/rate-limit-service: {}
+  backend/feature-flag-service: {}
+
+  # ── Auth foundation ──
+  auth/auth-service: {}
+
+  # ── Data foundation ──
+  data/data-catalog-service: {}
+  data/data-warehouse-service: {}
+
+  # ── Media foundation ──
+  media/asset-storage-service: {}
+  media/cdn-service: {}
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # LAYER 1 — Core services that depend on Layer 0 foundations
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # ── Auth layer 1 ──
+  auth/token-service:
+    depends_on: ["auth/auth-service"]
+  auth/session-service:
+    depends_on: ["auth/auth-service"]
+  auth/permission-service:
+    depends_on: ["auth/auth-service"]
+  auth/password-service:
+    depends_on: ["auth/auth-service"]
+  auth/identity-service:
+    depends_on: ["auth/auth-service"]
+  auth/api-key-service:
+    depends_on: ["auth/auth-service"]
+
+  # ── Backend layer 1 ──
+  backend/user-service:
+    depends_on: ["auth/auth-service", "backend/config-service"]
+  backend/audit-service:
+    depends_on: ["backend/config-service"]
+  backend/property-service:
+    depends_on: ["backend/config-service", "infra/cache-service"]
+  backend/listing-service:
+    depends_on: ["backend/config-service"]
+  backend/geocoding-service:
+    depends_on: ["backend/config-service", "infra/cache-service"]
+
+  # ── Infra layer 1 ──
+  infra/graphql-gateway:
+    depends_on: ["infra/api-gateway", "infra/service-discovery"]
+  infra/grpc-gateway:
+    depends_on: ["infra/api-gateway", "infra/service-discovery"]
+  infra/bff-web:
+    depends_on: ["infra/api-gateway"]
+  infra/bff-mobile:
+    depends_on: ["infra/api-gateway"]
+
+  # ── Messaging layer 1 ──
+  messaging/event-bus-service:
+    depends_on: ["infra/service-discovery"]
+  messaging/kafka-producer-service:
+    depends_on: ["infra/service-discovery"]
+
+  # ── Media layer 1 ──
+  media/image-service:
+    depends_on: ["media/asset-storage-service", "media/cdn-service"]
+  media/image-resize-service:
+    depends_on: ["media/asset-storage-service"]
+  media/photo-upload-service:
+    depends_on: ["media/asset-storage-service"]
+
+  # ── Search layer 1 ──
+  search/elasticsearch-service:
+    depends_on: ["infra/cache-service", "infra/service-discovery"]
+  search/search-indexer:
+    depends_on: ["data/data-warehouse-service"]
+
+  # ── Data layer 1 ──
+  data/listing-etl:
+    depends_on: ["data/data-warehouse-service"]
+  data/property-etl:
+    depends_on: ["data/data-warehouse-service"]
+  data/mls-ingestion:
+    depends_on: ["data/data-catalog-service"]
+
+  # ── ML layer 1 ──
+  ml/feature-store-service:
+    depends_on: ["data/data-warehouse-service"]
+  ml/model-registry-service:
+    depends_on: ["data/data-catalog-service"]
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # LAYER 2 — Business logic services that depend on Layer 1
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # ── Auth layer 2 ──
+  auth/oauth-service:
+    depends_on: ["auth/token-service", "auth/session-service"]
+  auth/mfa-service:
+    depends_on: ["auth/token-service"]
+  auth/sso-service:
+    depends_on: ["auth/token-service", "auth/permission-service"]
+  auth/fraud-auth-service:
+    depends_on: ["auth/session-service", "auth/identity-service"]
+  auth/kyc-service:
+    depends_on: ["auth/identity-service"]
+
+  # ── Backend layer 2 ──
+  backend/document-service:
+    depends_on: ["backend/audit-service", "media/asset-storage-service"]
+  backend/search-api:
+    depends_on: ["search/elasticsearch-service", "backend/property-service"]
+  backend/zestimate-service:
+    depends_on: ["backend/property-service", "ml/feature-store-service"]
+  backend/mortgage-service:
+    depends_on: ["backend/user-service", "backend/property-service"]
+  backend/crm-service:
+    depends_on: ["backend/user-service", "backend/audit-service"]
+  backend/listing-quality-service:
+    depends_on: ["backend/listing-service", "media/image-service"]
+  backend/favorite-service:
+    depends_on: ["backend/user-service", "backend/property-service"]
+  backend/recommendation-service:
+    depends_on: ["backend/user-service", "backend/property-service"]
+  backend/school-service:
+    depends_on: ["backend/geocoding-service"]
+  backend/neighborhood-service:
+    depends_on: ["backend/geocoding-service", "backend/property-service"]
+  backend/comparable-sales-service:
+    depends_on: ["backend/property-service", "backend/geocoding-service"]
+
+  # ── Notification layer 2 ──
+  notification/notification-service:
+    depends_on: ["messaging/event-bus-service", "backend/user-service"]
+  notification/email-service:
+    depends_on: ["messaging/event-bus-service"]
+  notification/push-notification-service:
+    depends_on: ["messaging/event-bus-service"]
+  notification/sms-service:
+    depends_on: ["messaging/event-bus-service"]
+
+  # ── Messaging layer 2 ──
+  messaging/listing-events-consumer:
+    depends_on: ["messaging/event-bus-service", "backend/listing-service"]
+  messaging/user-events-consumer:
+    depends_on: ["messaging/event-bus-service", "backend/user-service"]
+  messaging/notification-consumer:
+    depends_on: ["messaging/event-bus-service"]
+
+  # ── Search layer 2 ──
+  search/search-ui:
+    depends_on: ["search/elasticsearch-service", "backend/property-service"]
+  search/autocomplete-service:
+    depends_on: ["search/elasticsearch-service"]
+  search/geo-search-service:
+    depends_on: ["search/elasticsearch-service", "backend/geocoding-service"]
+  search/search-ranking-model:
+    depends_on: ["search/search-indexer", "ml/feature-store-service"]
+
+  # ── ML layer 2 ──
+  ml/zestimate-model:
+    depends_on: ["ml/feature-store-service", "ml/model-registry-service"]
+  ml/lead-scoring-model:
+    depends_on: ["ml/feature-store-service"]
+  ml/listing-recommendation:
+    depends_on: ["ml/feature-store-service"]
+  ml/inference-gateway:
+    depends_on: ["ml/model-registry-service", "infra/api-gateway"]
+
+  # ── Analytics layer 2 ──
+  analytics/event-tracking-service:
+    depends_on: ["messaging/kafka-producer-service"]
+  analytics/metrics-service:
+    depends_on: ["data/data-warehouse-service"]
+
+  # ── Payment layer 2 ──
+  payment/payment-service:
+    depends_on: ["backend/user-service", "backend/audit-service"]
+  payment/stripe-service:
+    depends_on: ["backend/config-service"]
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # LAYER 3 — High-level features that depend on Layer 2
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # ── Auth layer 3 ──
+  auth/social-login-service:
+    depends_on: ["auth/oauth-service"]
+  auth/bot-detection-service:
+    depends_on: ["auth/fraud-auth-service"]
+  auth/captcha-service:
+    depends_on: ["auth/fraud-auth-service"]
+
+  # ── Backend layer 3 ──
+  backend/e-sign-service:
+    depends_on: ["backend/document-service"]
+  backend/offer-service:
+    depends_on: ["backend/mortgage-service", "backend/document-service"]
+  backend/lead-service:
+    depends_on: ["backend/crm-service", "backend/user-service"]
+  backend/contract-service:
+    depends_on: ["backend/document-service", "backend/e-sign-service"]
+  backend/appraisal-service:
+    depends_on: ["backend/property-service", "backend/comparable-sales-service"]
+  backend/market-trends-service:
+    depends_on: ["backend/comparable-sales-service", "backend/zestimate-service"]
+  backend/saved-search-service:
+    depends_on: ["backend/favorite-service", "search/elasticsearch-service"]
+  backend/personalization-service:
+    depends_on: ["backend/recommendation-service", "ml/listing-recommendation"]
+  backend/home-details-service:
+    depends_on: ["backend/property-service", "backend/school-service", "backend/neighborhood-service"]
+
+  # ── Notification layer 3 ──
+  notification/price-alert-service:
+    depends_on: ["notification/notification-service", "backend/zestimate-service"]
+  notification/new-listing-alert:
+    depends_on: ["notification/notification-service", "backend/listing-service"]
+  notification/showing-reminder:
+    depends_on: ["notification/notification-service"]
+
+  # ── Analytics layer 3 ──
+  analytics/dashboard-service:
+    depends_on: ["analytics/metrics-service", "analytics/event-tracking-service"]
+  analytics/funnel-service:
+    depends_on: ["analytics/event-tracking-service"]
+  analytics/reporting-service:
+    depends_on: ["analytics/metrics-service"]
+  analytics/attribution-service:
+    depends_on: ["analytics/event-tracking-service"]
+
+  # ── Payment layer 3 ──
+  payment/subscription-service:
+    depends_on: ["payment/payment-service", "payment/stripe-service"]
+  payment/billing-service:
+    depends_on: ["payment/payment-service"]
+  payment/invoice-service:
+    depends_on: ["payment/payment-service"]
+
+  # ── Frontend layer 3 ──
+  frontend/zillow-web:
+    depends_on: ["infra/bff-web", "backend/search-api"]
+  frontend/search-ui:
+    depends_on: ["infra/bff-web", "search/autocomplete-service"]
+  frontend/property-detail-page:
+    depends_on: ["infra/bff-web", "backend/home-details-service"]
+  frontend/agent-portal:
+    depends_on: ["infra/bff-web", "backend/crm-service"]
+  frontend/mobile-web:
+    depends_on: ["infra/bff-mobile"]

@@ -1,0 +1,285 @@
+name: "Security & Compliance Audit"
+
+on:
+  schedule:
+    - cron: '0 2 * * 1'  # Weekly Monday 2am UTC
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - "Release: Production"
+    types:
+      - completed
+
+jobs:
+  inventory-dependencies:
+    name: Inventory Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Audit Node services
+        run: |
+          for service in auth-service listing-service search-api payment-service; do
+            dir=$(find services -type d -name "$service" | head -1)
+            if [ -d "$dir" ]; then
+              echo "Auditing $service in $dir"
+              cd "$dir"
+              npm audit --json > /tmp/npm-audit-${service}.json 2>/dev/null || true
+              cd "$GITHUB_WORKSPACE"
+            fi
+          done
+
+      - name: Audit Python services
+        run: |
+          pip install pip-audit
+          for service in ml-service recommendation-service zestimate-service; do
+            dir=$(find services -type d -name "$service" | head -1)
+            if [ -d "$dir" ] && [ -f "$dir/requirements.txt" ]; then
+              pip-audit -r "$dir/requirements.txt" -o json > /tmp/pip-audit-${service}.json 2>/dev/null || true
+            fi
+          done
+
+      - name: Audit Go modules
+        run: |
+          for dir in $(find services -name "go.mod" -exec dirname {} \;); do
+            service=$(basename "$dir")
+            cd "$dir"
+            go list -m -json all > /tmp/go-modules-${service}.json 2>/dev/null || true
+            cd "$GITHUB_WORKSPACE"
+          done
+        env:
+          GOPATH: /home/runner/go
+
+      - name: Upload dependency inventories
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-inventory
+          path: /tmp/*audit*.json
+          retention-days: 30
+
+  sast-full-scan:
+    name: SAST Full Scan — ${{ matrix.group }}
+    runs-on: ubuntu-latest
+    needs: inventory-dependencies
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [auth, backend, frontend, ml]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Snyk scan (Node groups)
+        if: matrix.group == 'auth' || matrix.group == 'frontend'
+        uses: snyk/actions/node@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --sarif-file-output=snyk-${{ matrix.group }}.sarif --all-projects
+
+      - name: Run Snyk scan (Python groups)
+        if: matrix.group == 'backend' || matrix.group == 'ml'
+        uses: snyk/actions/python@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --sarif-file-output=snyk-${{ matrix.group }}.sarif --all-projects
+
+      - name: Upload SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: snyk-${{ matrix.group }}.sarif
+          category: snyk-${{ matrix.group }}
+
+  secrets-scan:
+    name: Secrets Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run TruffleHog
+        run: |
+          docker run --rm -v "$PWD:/pwd" \
+            trufflesecurity/trufflehog:latest \
+            filesystem --directory /pwd --json > trufflehog-results.json 2>/dev/null || true
+          SECRETS_FOUND=$(wc -l < trufflehog-results.json)
+          echo "TruffleHog findings: $SECRETS_FOUND"
+          if [ "$SECRETS_FOUND" -gt 0 ]; then
+            echo "::error::TruffleHog detected potential secrets in the repository"
+            exit 1
+          fi
+
+      - name: Run Gitleaks
+        run: |
+          wget -q https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks_linux_x64.tar.gz
+          tar -xzf gitleaks_linux_x64.tar.gz gitleaks
+          ./gitleaks detect --report-format json --report-path gitleaks-report.json --exit-code 1 || GITLEAKS_EXIT=$?
+          if [ "${GITLEAKS_EXIT:-0}" -ne 0 ]; then
+            echo "::error::Gitleaks detected secrets — see gitleaks-report.json artifact"
+            exit 1
+          fi
+
+      - name: Upload secrets scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: secrets-scan-results
+          path: |
+            trufflehog-results.json
+            gitleaks-report.json
+          retention-days: 30
+
+  license-compliance:
+    name: License Compliance
+    runs-on: ubuntu-latest
+    needs: inventory-dependencies
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check Node.js licenses
+        run: |
+          npm install -g license-checker
+          license-checker --json > license-report.json 2>/dev/null || true
+
+      - name: Check Python licenses
+        run: |
+          pip install pip-licenses
+          pip-licenses --format json > python-licenses.json 2>/dev/null || true
+
+      - name: Validate approved licenses
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          approved = {'MIT', 'Apache-2.0', 'BSD-2-Clause', 'BSD-3-Clause', 'ISC', 'Unlicense', 'CC0-1.0'}
+          rejected = {'GPL-2.0', 'GPL-3.0', 'AGPL-3.0', 'LGPL-2.0', 'LGPL-2.1', 'LGPL-3.0'}
+          violations = []
+          try:
+            with open('license-report.json') as f:
+              data = json.load(f)
+            for pkg, info in data.items():
+              lic = info.get('licenses', '')
+              if any(r in lic for r in rejected):
+                violations.append(f"Node: {pkg} — {lic}")
+          except Exception as e:
+            print(f"Warning: could not parse license-report.json: {e}")
+          try:
+            with open('python-licenses.json') as f:
+              data = json.load(f)
+            for pkg in data:
+              lic = pkg.get('License', '')
+              if any(r in lic for r in rejected):
+                violations.append(f"Python: {pkg.get('Name')} — {lic}")
+          except Exception as e:
+            print(f"Warning: could not parse python-licenses.json: {e}")
+          if violations:
+            print("::error::GPL/AGPL licenses found outside approved exceptions:")
+            for v in violations:
+              print(f"  {v}")
+            sys.exit(1)
+          print("All licenses comply with policy.")
+          EOF
+
+      - name: Upload license reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: license-reports
+          path: |
+            license-report.json
+            python-licenses.json
+          retention-days: 30
+
+  generate-audit-report:
+    name: Generate Audit Report
+    runs-on: ubuntu-latest
+    needs: [sast-full-scan, secrets-scan, license-compliance]
+    if: always()
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: audit-artifacts/
+
+      - name: Aggregate findings into Markdown report
+        run: |
+          python3 - <<'EOF'
+          import os, json, glob
+          from datetime import datetime
+          lines = [
+            f"# Security & Compliance Audit Report",
+            f"**Date:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
+            f"**Run:** [{os.environ.get('GITHUB_RUN_ID')}]"
+            f"(https://github.com/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ.get('GITHUB_RUN_ID')})",
+            "",
+            "## Summary",
+            f"| Check | Status |",
+            f"|-------|--------|",
+            f"| SAST Scan | {'✅' if os.environ.get('SAST_RESULT','success')=='success' else '❌'} |",
+            f"| Secrets Scan | {'✅' if os.environ.get('SECRETS_RESULT','success')=='success' else '❌'} |",
+            f"| License Compliance | {'✅' if os.environ.get('LICENSE_RESULT','success')=='success' else '❌'} |",
+            "",
+            "## Artifact Files",
+          ]
+          for f in glob.glob('audit-artifacts/**/*', recursive=True):
+            if os.path.isfile(f):
+              lines.append(f"- `{f}`")
+          with open('audit-report.md', 'w') as out:
+            out.write('\n'.join(lines))
+          print('\n'.join(lines))
+          EOF
+        env:
+          SAST_RESULT: ${{ needs.sast-full-scan.result }}
+          SECRETS_RESULT: ${{ needs.secrets-scan.result }}
+          LICENSE_RESULT: ${{ needs.license-compliance.result }}
+
+      - name: Post to GitHub Step Summary
+        run: cat audit-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-report
+          path: audit-report.md
+          retention-days: 90
+
+  notify-security-team:
+    name: Notify Security Team
+    needs: generate-audit-report
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service_name: security-audit
+      environment: all
+      status: ${{ needs.generate-audit-report.result }}
+      triggered_by: scheduler
+    secrets: inherit

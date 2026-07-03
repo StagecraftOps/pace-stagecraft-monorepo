@@ -1,0 +1,184 @@
+# =============================================================================
+# REUSABLE WORKFLOW — Single Service CI Executor
+# =============================================================================
+# The ONLY reusable workflow for service-level CI.  Called once per service
+# by domain-ci.yml's matrix.  This keeps the unique-reusable-workflow count
+# at exactly 2 (domain-ci.yml + service-ci.yml), well under the 50 limit.
+#
+# ─── EXECUTION FLOW ──────────────────────────────────────────────────────
+#
+#   1. Read service-config.json (if present) for explicit runtime & flags
+#   2. Fallback to auto-detection from project files
+#   3. Invoke the matching composite action (node-ci / python-ci / go-ci / java-ci)
+#
+# ─── CONFIG PRIORITY ─────────────────────────────────────────────────────
+#
+#   service-config.json  →  overrides auto-detection
+#   File-based detection →  package.json / requirements.txt / go.mod / pom.xml / build.gradle
+#
+# =============================================================================
+
+name: "Service CI"
+
+on:
+  workflow_call:
+    inputs:
+      domain:
+        description: "Domain folder name under services/ (e.g. backend, auth)"
+        required: true
+        type: string
+      service:
+        description: "Service folder name (e.g. auth-service, geocoding-service)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: "\u2699\ufe0f ${{ inputs.domain }}/${{ inputs.service }}"
+    runs-on: [self-hosted, arc-runner]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve configuration and runtime
+        id: config
+        shell: bash
+        run: |
+          SVC_PATH="services/${{ inputs.domain }}/${{ inputs.service }}"
+          echo "path=$SVC_PATH" >> "$GITHUB_OUTPUT"
+
+          echo "============================================="
+          echo "  \u2699\ufe0f  SERVICE CI  \u2014  1 service = 1 job"
+          echo "============================================="
+          echo "  Service  : ${{ inputs.service }}"
+          echo "  Domain   : ${{ inputs.domain }}"
+          echo "  Path     : $SVC_PATH"
+          echo "  Workflow : service-ci.yml (reusable)"
+          echo "  Called by: domain-ci.yml \u2192 service-ci.yml"
+          echo "============================================="
+
+          # ── 1. Check service-config.json for explicit overrides ──
+          RUNTIME=""
+          SKIP_TEST="false"
+          SKIP_BUILD="false"
+          BUILD_TOOL=""
+
+          if [ -f "service-config.json" ]; then
+            CFG=$(jq -r --arg svc "${{ inputs.service }}" '.[$svc] // empty' service-config.json)
+            if [ -n "$CFG" ]; then
+              RUNTIME=$(echo "$CFG" | jq -r '.runtime // empty')
+              TEST_FLAG=$(echo "$CFG" | jq -r '.test // true')
+              BUILD_FLAG=$(echo "$CFG" | jq -r '.build // true')
+              [ "$TEST_FLAG" = "false" ] && SKIP_TEST="true"
+              [ "$BUILD_FLAG" = "false" ] && SKIP_BUILD="true"
+              echo "📋 Config override for ${{ inputs.service }}: runtime=$RUNTIME test=$TEST_FLAG build=$BUILD_FLAG"
+            fi
+          fi
+
+          # ── 2. Fallback: auto-detect from project files ──
+          if [ -z "$RUNTIME" ]; then
+            if [ -f "$SVC_PATH/package.json" ]; then
+              RUNTIME="node"
+            elif [ -f "$SVC_PATH/requirements.txt" ]; then
+              RUNTIME="python"
+            elif [ -f "$SVC_PATH/go.mod" ]; then
+              RUNTIME="go"
+            elif [ -f "$SVC_PATH/pom.xml" ]; then
+              RUNTIME="java"
+              BUILD_TOOL="maven"
+            elif [ -f "$SVC_PATH/build.gradle" ]; then
+              RUNTIME="java"
+              BUILD_TOOL="gradle"
+            else
+              RUNTIME="unknown"
+            fi
+            echo "🔍 Auto-detected runtime: $RUNTIME"
+          fi
+
+          # For java specified via config, still need to detect build tool
+          if [ "$RUNTIME" = "java" ] && [ -z "$BUILD_TOOL" ]; then
+            if [ -f "$SVC_PATH/pom.xml" ]; then
+              BUILD_TOOL="maven"
+            elif [ -f "$SVC_PATH/build.gradle" ]; then
+              BUILD_TOOL="gradle"
+            fi
+          fi
+
+          echo "runtime=$RUNTIME"       >> "$GITHUB_OUTPUT"
+          echo "skip_test=$SKIP_TEST"   >> "$GITHUB_OUTPUT"
+          echo "skip_build=$SKIP_BUILD" >> "$GITHUB_OUTPUT"
+          echo "build_tool=$BUILD_TOOL" >> "$GITHUB_OUTPUT"
+
+      # ── Runtime-specific composite actions (only the matching one runs) ──
+
+      - name: "Run Node.js CI"
+        if: steps.config.outputs.runtime == 'node'
+        uses: ./.github/actions/node-ci
+        with:
+          path: ${{ steps.config.outputs.path }}
+          skip-test: ${{ steps.config.outputs.skip_test }}
+          skip-build: ${{ steps.config.outputs.skip_build }}
+
+      - name: "Run Python CI"
+        if: steps.config.outputs.runtime == 'python'
+        uses: ./.github/actions/python-ci
+        with:
+          path: ${{ steps.config.outputs.path }}
+          skip-test: ${{ steps.config.outputs.skip_test }}
+
+      - name: "Run Go CI"
+        if: steps.config.outputs.runtime == 'go'
+        uses: ./.github/actions/go-ci
+        with:
+          path: ${{ steps.config.outputs.path }}
+          skip-test: ${{ steps.config.outputs.skip_test }}
+          skip-build: ${{ steps.config.outputs.skip_build }}
+
+      - name: "Run Java CI"
+        if: steps.config.outputs.runtime == 'java'
+        uses: ./.github/actions/java-ci
+        with:
+          path: ${{ steps.config.outputs.path }}
+          build-tool: ${{ steps.config.outputs.build_tool }}
+          skip-test: ${{ steps.config.outputs.skip_test }}
+
+      - name: "Unknown runtime — skip"
+        if: steps.config.outputs.runtime == 'unknown'
+        shell: bash
+        run: echo "⚠️  No recognized project file found — skipping build."
+
+      - name: "Write service summary"
+        if: always()
+        shell: bash
+        run: |
+          RUNTIME="${{ steps.config.outputs.runtime }}"
+          SKIP_TEST="${{ steps.config.outputs.skip_test }}"
+          SKIP_BUILD="${{ steps.config.outputs.skip_build }}"
+
+          case "$RUNTIME" in
+            node)   ACTION=".github/actions/node-ci" ;;
+            python) ACTION=".github/actions/python-ci" ;;
+            go)     ACTION=".github/actions/go-ci" ;;
+            java)   ACTION=".github/actions/java-ci" ;;
+            *)      ACTION="none" ;;
+          esac
+
+          TEST_STATUS="Enabled"
+          [ "$SKIP_TEST" = "true" ] && TEST_STATUS="Skipped"
+          BUILD_STATUS="Enabled"
+          [ "$SKIP_BUILD" = "true" ] && BUILD_STATUS="Skipped"
+
+          {
+            echo "### ⚙️ ${{ inputs.domain }}/${{ inputs.service }}"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| **Runtime** | \`${RUNTIME}\` |"
+            echo "| **Composite action** | \`${ACTION}\` |"
+            echo "| **Tests** | ${TEST_STATUS} |"
+            echo "| **Build** | ${BUILD_STATUS} |"
+            echo "| **Execution** | 1 service = 1 dedicated job |"
+          } >> "$GITHUB_STEP_SUMMARY"

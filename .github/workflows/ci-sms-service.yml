@@ -1,0 +1,178 @@
+name: CI - SMS Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/notification/sms-service/**"
+      - ".github/workflows/ci-sms-service.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/notification/sms-service/**"
+      - ".github/workflows/ci-sms-service.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/notification/sms-service
+  NODE_VERSION: "20"
+  IMAGE_NAME: sms-service
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: services/notification/sms-service/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run lint
+
+      - name: Run Prettier check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run format:check
+
+      - name: Run TypeScript type check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run type-check
+
+  unit-test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: services/notification/sms-service/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run Jest unit tests with 80% coverage
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          NODE_ENV: test
+          TWILIO_ACCOUNT_SID: ACmock_sid_for_testing_only
+          TWILIO_AUTH_TOKEN: mock_auth_token_for_testing
+          TWILIO_FROM_NUMBER: "+15005550006"
+        run: |
+          npm run test:unit -- \
+            --coverage \
+            --coverageThreshold='{"global":{"lines":80,"branches":75}}' \
+            --ci
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: sms-service-coverage
+          path: ${{ env.SERVICE_DIR }}/coverage/
+
+  opt-out-compliance-check:
+    name: TCPA Opt-Out Compliance Validation
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: services/notification/sms-service/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run TCPA opt-out compliance unit tests
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          NODE_ENV: test
+        run: npm run test:compliance -- --ci
+
+      - name: Verify opt-out list lookup is enforced before send
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: node scripts/verify-optout-enforcement.js
+
+      - name: Validate STOP/UNSTOP keyword handling
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: node scripts/validate-stop-keywords.js --keywords STOP,STOPALL,UNSUBSCRIBE,CANCEL,END,QUIT,UNSTOP,START
+
+      - name: Check no-send-to-optout unit tests exist and pass
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          NODE_ENV: test
+        run: |
+          npm run test:unit -- \
+            --testPathPattern='opt-out|optout|no-send' \
+            --ci \
+            --verbose
+
+      - name: Validate opt-out list sync configuration
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: node scripts/validate-optout-sync-config.js --config config/optout-sync.json
+
+  docker-build:
+    name: Docker Build
+    needs: opt-out-compliance-check
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_dir: services/notification/sms-service
+      image_name: sms-service
+      dockerfile: services/notification/sms-service/Dockerfile
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_dir: services/notification/sms-service
+      node_version: "20"
+      test_path: tests/integration/
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: sms-service
+      namespace: notification
+      image_tag: ${{ github.sha }}
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [deploy-staging, integration-test]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      workflow_name: "SMS Service CI"
+      service_name: sms-service
+      environment: staging
+    secrets: inherit

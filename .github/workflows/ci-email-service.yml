@@ -1,0 +1,169 @@
+name: CI - Email Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/notification/email-service/**"
+      - ".github/workflows/ci-email-service.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/notification/email-service/**"
+      - ".github/workflows/ci-email-service.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/notification/email-service
+  NODE_VERSION: "20"
+  IMAGE_NAME: email-service
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: services/notification/email-service/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run lint
+
+      - name: Run Prettier check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run format:check
+
+      - name: Run TypeScript type check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run type-check
+
+  unit-test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: services/notification/email-service/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run Jest unit tests with 82% coverage
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          NODE_ENV: test
+          SES_REGION: us-east-1
+          SENDGRID_API_KEY: mock_key_for_tests
+        run: |
+          npm run test:unit -- \
+            --coverage \
+            --coverageThreshold='{"global":{"lines":82,"branches":75}}' \
+            --ci
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: email-service-coverage
+          path: ${{ env.SERVICE_DIR }}/coverage/
+
+  template-validation:
+    name: Email Template Validation
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: services/notification/email-service/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Validate Handlebars template syntax
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: node scripts/validate-templates.js --dir templates/ --strict
+
+      - name: Render all templates with mock data
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: node scripts/render-templates.js --dir templates/ --fixtures fixtures/
+
+      - name: Check rendered HTML for broken links
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: node scripts/check-template-links.js --rendered-dir /tmp/rendered-templates/
+
+      - name: Validate template variable schemas
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: node scripts/validate-template-vars.js --dir templates/ --schema schemas/template-vars.json
+
+      - name: Run email accessibility checks (a11y)
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: node scripts/check-email-accessibility.js --dir /tmp/rendered-templates/
+
+  docker-build:
+    name: Docker Build
+    needs: template-validation
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_dir: services/notification/email-service
+      image_name: email-service
+      dockerfile: services/notification/email-service/Dockerfile
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_dir: services/notification/email-service
+      node_version: "20"
+      test_path: tests/integration/
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: email-service
+      namespace: notification
+      image_tag: ${{ github.sha }}
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [deploy-staging, integration-test]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      workflow_name: "Email Service CI"
+      service_name: email-service
+      environment: staging
+    secrets: inherit

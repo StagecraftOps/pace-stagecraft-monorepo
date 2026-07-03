@@ -1,0 +1,211 @@
+name: CI - Realtime Aggregation Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/data/realtime-aggregation/**"
+      - ".github/workflows/ci-realtime-aggregation.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/data/realtime-aggregation/**"
+      - ".github/workflows/ci-realtime-aggregation.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/data/realtime-aggregation
+  PYTHON_VERSION: "3.11"
+  GO_VERSION: "1.22"
+  IMAGE_NAME: realtime-aggregation
+
+jobs:
+  lint:
+    name: Lint (Python + Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: services/data/realtime-aggregation/go.sum
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/realtime-aggregation/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python lint tools
+        run: pip install flake8 black isort
+
+      - name: Run Python flake8
+        working-directory: ${{ env.SERVICE_DIR }}/python
+        run: flake8 . --max-line-length=120 --extend-ignore=E203,W503
+
+      - name: Check Python black formatting
+        working-directory: ${{ env.SERVICE_DIR }}/python
+        run: black --check .
+
+      - name: Install Go lint tools
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.57.0
+
+      - name: Run golangci-lint
+        working-directory: ${{ env.SERVICE_DIR }}/go
+        run: golangci-lint run ./...
+
+  unit-test:
+    name: Unit Tests (Python + Go)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: services/data/realtime-aggregation/go.sum
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/realtime-aggregation/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python dependencies
+        working-directory: ${{ env.SERVICE_DIR }}/python
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run Python pytest with coverage
+        working-directory: ${{ env.SERVICE_DIR }}/python
+        env:
+          ENVIRONMENT: test
+        run: |
+          pytest tests/unit/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=80 \
+            -v --tb=short
+
+      - name: Run Go unit tests with coverage
+        working-directory: ${{ env.SERVICE_DIR }}/go
+        run: |
+          go test ./... \
+            -v \
+            -coverprofile=coverage.out \
+            -covermode=atomic
+
+      - name: Check Go coverage threshold
+        working-directory: ${{ env.SERVICE_DIR }}/go
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
+          echo "Go coverage: ${COVERAGE}%"
+          if (( $(echo "$COVERAGE < 80" | bc -l) )); then
+            echo "Go coverage ${COVERAGE}% is below 80% threshold"
+            exit 1
+          fi
+
+  throughput-test:
+    name: Throughput Validation (50k msgs/sec)
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: services/data/realtime-aggregation/go.sum
+
+      - name: Build aggregation benchmark binary
+        working-directory: ${{ env.SERVICE_DIR }}/go
+        run: go build -o /tmp/bench_aggregator ./cmd/benchmark/
+
+      - name: Run throughput benchmark
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          BENCHMARK_DURATION_SEC: "30"
+          TARGET_MSGS_PER_SEC: "50000"
+        run: |
+          /tmp/bench_aggregator \
+            --duration ${{ env.BENCHMARK_DURATION_SEC }} \
+            --target-rate ${{ env.TARGET_MSGS_PER_SEC }} \
+            --output /tmp/throughput_results.json
+
+      - name: Validate throughput results
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          python3 scripts/validate_throughput.py \
+            --results /tmp/throughput_results.json \
+            --min-rate 50000
+
+      - name: Upload throughput results
+        uses: actions/upload-artifact@v4
+        with:
+          name: throughput-results
+          path: /tmp/throughput_results.json
+
+  docker-build:
+    name: Docker Build
+    needs: throughput-test
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_dir: services/data/realtime-aggregation
+      image_name: realtime-aggregation
+      dockerfile: services/data/realtime-aggregation/Dockerfile
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_dir: services/data/realtime-aggregation
+      python_version: "3.11"
+      test_path: tests/integration/
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: realtime-aggregation
+      namespace: data-pipeline
+      image_tag: ${{ github.sha }}
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [deploy-staging, integration-test]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      workflow_name: "Realtime Aggregation CI"
+      service_name: realtime-aggregation
+      environment: staging
+    secrets: inherit

@@ -1,0 +1,129 @@
+name: "CI — admin-dashboard"
+
+on:
+  push:
+    paths:
+      - "services/frontend/admin-dashboard/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/frontend/admin-dashboard/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-admin-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-admin-${{ hashFiles('services/frontend/admin-dashboard/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-admin-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/admin-dashboard
+      - name: Lint (ESLint)
+        run: npm run lint
+        working-directory: services/frontend/admin-dashboard
+      - name: Format check (Prettier)
+        run: npm run format:check
+        working-directory: services/frontend/admin-dashboard
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-admin-${{ hashFiles('services/frontend/admin-dashboard/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-admin-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/admin-dashboard
+      - name: TypeScript type check
+        run: npm run type-check
+        working-directory: services/frontend/admin-dashboard
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: [lint, type-check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-admin-${{ hashFiles('services/frontend/admin-dashboard/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-admin-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/admin-dashboard
+      - name: Run unit tests with coverage
+        run: npm test -- --ci --coverage --coverageThreshold='{"global":{"lines":85}}'
+        working-directory: services/frontend/admin-dashboard
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: admin-dashboard-coverage
+          path: services/frontend/admin-dashboard/coverage/
+
+  security-scan:
+    needs: [lint]
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: admin-dashboard
+      working_directory: services/frontend/admin-dashboard
+      severity_threshold: HIGH
+    secrets: inherit
+
+  build:
+    needs: [unit-test, security-scan]
+    uses: ./.github/workflows/_template-node-ci.yml
+    with:
+      service_name: admin-dashboard
+      node_version: "20"
+      working_directory: services/frontend/admin-dashboard
+      run_e2e: false
+    secrets: inherit
+
+  e2e-test:
+    needs: [build]
+    uses: ./.github/workflows/_template-e2e-test.yml
+    with:
+      service_name: admin-dashboard
+      base_url: https://staging-admin.internal
+      browser_list: chromium
+      test_grep_pattern: "user management|moderation|fraud review"
+    secrets: inherit
+
+  deploy-staging:
+    needs: [e2e-test]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: admin-staging
+      service_name: admin-dashboard
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: frontend
+      helm_chart_path: charts/admin-dashboard
+      replicas: 1
+      wait_for_rollout: true
+    secrets: inherit

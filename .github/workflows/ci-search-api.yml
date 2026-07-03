@@ -1,0 +1,165 @@
+name: "CI — search-api"
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "services/backend/search-api/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/backend/search-api/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-search-api-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.22"
+  SERVICE_DIR: services/backend/search-api
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-search-api-${{ hashFiles('services/backend/search-api/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-search-api-
+
+      - name: Download Go modules
+        run: cd services/backend/search-api && go mod download
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          working-directory: services/backend/search-api
+          args: --timeout 5m --config ../../.golangci.yml
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-search-api-${{ hashFiles('services/backend/search-api/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-search-api-
+
+      - name: Run unit tests with race detector
+        run: |
+          cd services/backend/search-api
+          go test -race -count=1 -coverprofile=coverage.out -covermode=atomic -timeout 5m ./...
+
+      - name: Assert 85% coverage threshold
+        run: |
+          cd services/backend/search-api
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
+          echo "Coverage: $COVERAGE%"
+          awk "BEGIN{exit ($COVERAGE < 85)}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: search-api-coverage
+          path: services/backend/search-api/coverage.out
+
+  security-scan:
+    needs: lint
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: search-api
+      working_directory: services/backend/search-api
+      severity_threshold: HIGH
+    secrets: inherit
+
+  build:
+    needs: unit-test
+    uses: ./.github/workflows/_template-go-ci.yml
+    with:
+      service_name: search-api
+      go_version: "1.22"
+      working_directory: services/backend/search-api
+    secrets: inherit
+
+  docker-build:
+    needs: [build, security-scan]
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: search-api
+      dockerfile_path: services/backend/search-api/Dockerfile
+      ecr_repository: stagecraft/search-api
+      image_tag: ${{ github.sha }}
+      push_image: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  integration-test:
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: search-api
+      test_suite: search-filters
+      environment_url: http://localhost:8020
+      test_timeout_minutes: 25
+    secrets: inherit
+
+  load-test:
+    runs-on: ubuntu-latest
+    needs: integration-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install k6 load testing tool
+        run: npm install -g k6
+
+      - name: Run search-api load test (200 VUs, 3 minutes)
+        run: |
+          k6 run \
+            --vus 200 \
+            --duration 3m \
+            --summary-export=k6-summary.json \
+            services/backend/search-api/tests/perf/search-load.js
+
+      - name: Assert k6 performance thresholds
+        run: |
+          python3 scripts/check-k6-thresholds.py k6-summary.json \
+            --p99-max 100 \
+            --p95-max 50
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: search-api-k6-summary
+          path: k6-summary.json
+
+  deploy-staging:
+    needs: load-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: search-api
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: backend
+      helm_chart_path: charts/search-api
+      replicas: 4
+      wait_for_rollout: true
+    secrets: inherit

@@ -1,0 +1,170 @@
+name: "CI — audit-service"
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "services/backend/audit-service/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/backend/audit-service/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.22"
+  SERVICE_DIR: services/backend/audit-service
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-audit-${{ hashFiles('services/backend/audit-service/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-audit-
+
+      - name: Download Go modules
+        run: cd services/backend/audit-service && go mod download
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          working-directory: services/backend/audit-service
+          args: --timeout 5m --config ../../.golangci.yml
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-audit-${{ hashFiles('services/backend/audit-service/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-audit-
+
+      - name: Run unit tests with race detector
+        run: |
+          cd services/backend/audit-service
+          go test -race -count=1 -coverprofile=coverage.out -covermode=atomic -timeout 5m ./...
+
+      - name: Assert 85% coverage threshold
+        run: |
+          cd services/backend/audit-service
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
+          echo "Coverage: $COVERAGE%"
+          awk "BEGIN{exit ($COVERAGE < 85)}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audit-service-coverage
+          path: services/backend/audit-service/coverage.out
+
+  compliance-test:
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-audit-${{ hashFiles('services/backend/audit-service/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-audit-
+
+      - name: Test audit log immutability — entries cannot be modified or deleted
+        run: |
+          cd services/backend/audit-service
+          go test -run TestImmutability ./... -v -count=1
+
+      - name: Test HMAC chain tamper detection integrity
+        run: |
+          cd services/backend/audit-service
+          go test -run TestTamperDetection ./... -v -count=1
+
+      - name: Test GDPR erasure tokens preserve audit trail
+        run: |
+          cd services/backend/audit-service
+          go test -run TestGDPRErasure ./... -v -count=1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audit-compliance-results
+          path: services/backend/audit-service/compliance-results.xml
+
+  security-scan:
+    needs: lint
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: audit-service
+      working_directory: services/backend/audit-service
+      severity_threshold: HIGH
+    secrets: inherit
+
+  build:
+    needs: [unit-test, compliance-test]
+    uses: ./.github/workflows/_template-go-ci.yml
+    with:
+      service_name: audit-service
+      go_version: "1.22"
+      working_directory: services/backend/audit-service
+    secrets: inherit
+
+  docker-build:
+    needs: [build, security-scan]
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: audit-service
+      dockerfile_path: services/backend/audit-service/Dockerfile
+      ecr_repository: stagecraft/audit-service
+      image_tag: ${{ github.sha }}
+      push_image: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  integration-test:
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: audit-service
+      test_suite: audit-ingestion
+      environment_url: http://localhost:8023
+      test_timeout_minutes: 25
+    secrets: inherit
+
+  deploy-staging:
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: audit-service
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: backend
+      helm_chart_path: charts/audit-service
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

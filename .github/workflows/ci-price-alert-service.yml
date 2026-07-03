@@ -1,0 +1,189 @@
+name: CI - Price Alert Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/notification/price-alert-service/**"
+      - ".github/workflows/ci-price-alert-service.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/notification/price-alert-service/**"
+      - ".github/workflows/ci-price-alert-service.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/notification/price-alert-service
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: price-alert-service
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/notification/price-alert-service/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install lint tools
+        run: pip install flake8 black isort mypy pylint
+
+      - name: Run flake8
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: flake8 src/ --max-line-length=120 --extend-ignore=E203,W503
+
+      - name: Check black formatting
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: black --check src/
+
+      - name: Check import ordering
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: isort --check-only --diff src/
+
+      - name: Run mypy type checks
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: mypy src/ --ignore-missing-imports
+
+  unit-test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/notification/price-alert-service/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest with 85% coverage threshold
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          ENVIRONMENT: test
+          AVM_SERVICE_URL: http://localhost:8080
+          NOTIFICATION_SERVICE_URL: http://localhost:8081
+        run: |
+          pytest tests/unit/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=85 \
+            -v --tb=short
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: price-alert-coverage
+          path: ${{ env.SERVICE_DIR }}/coverage.xml
+
+  alert-rule-validation:
+    name: Alert Rule Config Validation
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install validation dependencies
+        run: pip install jsonschema pyyaml
+
+      - name: Validate alert rule JSON schema definitions
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          python scripts/validate_alert_rules.py \
+            --rules-dir config/alert_rules/ \
+            --schema schemas/alert_rule_schema.json
+
+      - name: Check price threshold boundaries are sensible
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: python scripts/validate_threshold_bounds.py --config config/alert_rules/
+
+      - name: Validate Zestimate change percentage triggers
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          python scripts/validate_zestimate_triggers.py \
+            --config config/alert_rules/zestimate_triggers.json \
+            --min-change-pct 0.1 \
+            --max-change-pct 50.0
+
+      - name: Validate notification routing rules
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          python scripts/validate_routing_rules.py \
+            --config config/routing_rules.yml \
+            --required-channels email push sms
+
+  docker-build:
+    name: Docker Build
+    needs: alert-rule-validation
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_dir: services/notification/price-alert-service
+      image_name: price-alert-service
+      dockerfile: services/notification/price-alert-service/Dockerfile
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_dir: services/notification/price-alert-service
+      python_version: "3.11"
+      test_path: tests/integration/
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: price-alert-service
+      namespace: notification
+      image_tag: ${{ github.sha }}
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [deploy-staging, integration-test]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      workflow_name: "Price Alert Service CI"
+      service_name: price-alert-service
+      environment: staging
+    secrets: inherit

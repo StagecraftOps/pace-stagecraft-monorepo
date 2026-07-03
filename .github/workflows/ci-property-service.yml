@@ -1,0 +1,170 @@
+name: "CI — property-service"
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "services/backend/property-service/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/backend/property-service/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-property-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  SERVICE_DIR: services/backend/property-service
+
+jobs:
+  lint-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: property-${{ hashFiles('services/backend/property-service/requirements*.txt') }}
+          restore-keys: |
+            property-pip-
+
+      - name: Install dependencies
+        working-directory: services/backend/property-service
+        run: pip install -e ".[dev]"
+
+      - name: Run ruff linter
+        working-directory: services/backend/property-service
+        run: ruff check . --output-format=github
+
+      - name: Run mypy type checker
+        working-directory: services/backend/property-service
+        run: mypy app/ --ignore-missing-imports
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: lint-typecheck
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: property-${{ hashFiles('services/backend/property-service/requirements*.txt') }}
+          restore-keys: |
+            property-pip-
+
+      - name: Install dependencies
+        working-directory: services/backend/property-service
+        run: pip install -e ".[dev]"
+
+      - name: Run unit tests with coverage
+        working-directory: services/backend/property-service
+        run: pytest tests/unit/ -v --cov=app --cov-report=xml --cov-report=html --cov-fail-under=85 -x
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: property-service-coverage
+          path: |
+            services/backend/property-service/coverage.xml
+            services/backend/property-service/htmlcov/
+
+  data-validation-test:
+    runs-on: ubuntu-latest
+    needs: lint-typecheck
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: property-${{ hashFiles('services/backend/property-service/requirements*.txt') }}
+          restore-keys: |
+            property-pip-
+
+      - name: Install dependencies
+        working-directory: services/backend/property-service
+        run: pip install -e ".[dev]"
+
+      - name: Run property schema and type validation tests
+        working-directory: services/backend/property-service
+        run: pytest tests/data_validation/ -v -k "test_property_schema or test_property_types"
+
+      - name: Validate property fixtures against schema
+        working-directory: services/backend/property-service
+        run: python scripts/validate_fixtures.py tests/fixtures/properties/ --strict
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: property-data-validation-results
+          path: services/backend/property-service/test-results/
+
+  security-scan:
+    needs: lint-typecheck
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: property-service
+      working_directory: services/backend/property-service
+      severity_threshold: MEDIUM
+    secrets: inherit
+
+  build:
+    needs: [unit-test, data-validation-test]
+    uses: ./.github/workflows/_template-python-ci.yml
+    with:
+      service_name: property-service
+      python_version: "3.11"
+      working_directory: services/backend/property-service
+      run_integration: false
+    secrets: inherit
+
+  docker-build:
+    needs: [build, security-scan]
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: property-service
+      dockerfile_path: services/backend/property-service/Dockerfile
+      ecr_repository: stagecraft/property-service
+      image_tag: ${{ github.sha }}
+      push_image: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  integration-test:
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: property-service
+      test_suite: property
+      environment_url: http://localhost:8011
+      test_timeout_minutes: 15
+    secrets: inherit
+
+  deploy-staging:
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: property-service
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: backend
+      helm_chart_path: charts/property-service
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

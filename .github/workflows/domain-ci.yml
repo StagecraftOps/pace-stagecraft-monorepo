@@ -1,0 +1,109 @@
+# =============================================================================
+# CHILD CI WORKFLOW — Domain-level Parallel Executor (Reusable)
+# =============================================================================
+# Called by ci.yml once per domain-chunk.  Receives a pre-sliced JSON array
+# of service names (always ≤256) and delegates each service to the single
+# reusable service-ci.yml workflow via matrix strategy.
+#
+# ─── ARCHITECTURE ─────────────────────────────────────────────────────────
+#
+#   ci.yml  →  domain-ci.yml  →  service-ci.yml  →  composite actions
+#   (parent)   (this file)       (1 reusable WF)    (node/python/go/java)
+#
+#   Only 2 unique reusable workflows in the entire run:
+#     1. domain-ci.yml   (called by ci.yml)
+#     2. service-ci.yml  (called by domain-ci.yml)
+#   → Well under GitHub's 50-unique-reusable-workflow limit
+#
+#   Every service = its own job.  No sequential loops, no batching.
+#   The 256 matrix limit is handled by the PARENT, which splits large
+#   domains into multiple ≤256 chunks and calls this workflow once per chunk.
+#
+# =============================================================================
+
+name: "Domain CI"
+
+on:
+  workflow_call:
+    inputs:
+      domain:
+        description: "Domain folder name under services/ (e.g. backend, auth)"
+        required: true
+        type: string
+      services:
+        description: "JSON array of service names to build (pre-sliced to ≤256 by parent)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # One job per service — delegates to the single reusable service-ci.yml
+  # ---------------------------------------------------------------------------
+  run-service:
+    name: "\u2699\ufe0f ${{ inputs.domain }}/${{ matrix.service }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJson(inputs.services) }}
+    uses: ./.github/workflows/service-ci.yml
+    with:
+      domain: ${{ inputs.domain }}
+      service: ${{ matrix.service }}
+
+  # ---------------------------------------------------------------------------
+  # Domain summary
+  # ---------------------------------------------------------------------------
+  domain-summary:
+    name: "\U0001F4CA Summary — ${{ inputs.domain }}"
+    runs-on: [self-hosted, arc-runner]
+    needs: run-service
+    if: always()
+    steps:
+      - name: Report
+        run: |
+          echo "==============================================="
+          echo "  DOMAIN SUMMARY: ${{ inputs.domain }}"
+          echo "  Services in chunk: $(echo '${{ inputs.services }}' | jq '. | length')"
+          echo "  Service list: $(echo '${{ inputs.services }}' | jq -r 'join(", ")')"
+          echo "  Execution model: 1 service = 1 parallel job"
+          echo "  Reusable workflow: service-ci.yml"
+          echo "==============================================="
+
+          RESULT="${{ needs.run-service.result }}"
+          SVC_COUNT=$(echo '${{ inputs.services }}' | jq '. | length')
+          SVC_LIST=$(echo '${{ inputs.services }}' | jq -r '.[]')
+
+          if [ "$RESULT" = "success" ]; then
+            STATUS_ICON="\u2705"
+            STATUS_TEXT="All services passed"
+          else
+            STATUS_ICON="\u274c"
+            STATUS_TEXT="Some services failed"
+          fi
+
+          {
+            echo "## ${STATUS_ICON} Domain: \`${{ inputs.domain }}\`"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| **Services in chunk** | ${SVC_COUNT} |"
+            echo "| **Result** | ${STATUS_TEXT} |"
+            echo "| **Execution model** | 1 service = 1 job (parallel) |"
+            echo "| **Called via** | \`domain-ci.yml\` → \`service-ci.yml\` |"
+            echo ""
+            echo "<details><summary>Service list (${SVC_COUNT})</summary>"
+            echo ""
+            for svc in $SVC_LIST; do
+              echo "- \`${svc}\`"
+            done
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$RESULT" != "success" ]; then
+            echo "\u274c Some services failed in ${{ inputs.domain }}."
+            exit 1
+          fi

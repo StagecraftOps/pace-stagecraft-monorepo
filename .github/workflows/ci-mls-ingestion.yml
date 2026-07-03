@@ -1,0 +1,187 @@
+name: CI - MLS Ingestion Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/data/mls-ingestion/**"
+      - ".github/workflows/ci-mls-ingestion.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/data/mls-ingestion/**"
+      - ".github/workflows/ci-mls-ingestion.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/data/mls-ingestion
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: mls-ingestion
+
+jobs:
+  validate-schema:
+    name: Validate MLS Schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install schema validation dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install jsonschema pyyaml
+
+      - name: Validate MLS feed schemas
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: python scripts/validate_schemas.py --schema-dir schemas/
+
+      - name: Validate RETS configuration
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: python scripts/validate_rets_config.py --config config/rets_feeds.yml
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    needs: validate-schema
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/mls-ingestion/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install lint tools
+        run: pip install flake8 black isort pylint
+
+      - name: Run flake8
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: flake8 src/ --max-line-length=120 --extend-ignore=E203,W503
+
+      - name: Check black formatting
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: black --check src/
+
+      - name: Check import order
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: isort --check-only --diff src/
+
+  test:
+    name: Unit & Integration Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: mls_user
+          POSTGRES_PASSWORD: mls_pass
+          POSTGRES_DB: mls_staging
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/mls-ingestion/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run database migrations
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          DATABASE_URL: postgresql://mls_user:mls_pass@localhost:5432/mls_staging
+        run: python scripts/run_migrations.py
+
+      - name: Run pytest with 85% coverage threshold
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          DATABASE_URL: postgresql://mls_user:mls_pass@localhost:5432/mls_staging
+          ENVIRONMENT: test
+        run: |
+          pytest tests/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=85 \
+            -v --tb=short
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: mls-ingestion-coverage
+          path: ${{ env.SERVICE_DIR }}/coverage.xml
+
+  docker-build:
+    name: Docker Build
+    needs: test
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_dir: services/data/mls-ingestion
+      image_name: mls-ingestion
+      dockerfile: services/data/mls-ingestion/Dockerfile
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: docker-build
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: mls-ingestion
+      namespace: data-pipeline
+      image_tag: ${{ github.sha }}
+    secrets: inherit
+
+  security-scan:
+    name: Security Scan
+    needs: docker-build
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      image_name: mls-ingestion
+      image_tag: ${{ github.sha }}
+      severity_threshold: HIGH
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [deploy-staging, security-scan]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      workflow_name: "MLS Ingestion CI"
+      service_name: mls-ingestion
+      environment: staging
+    secrets: inherit

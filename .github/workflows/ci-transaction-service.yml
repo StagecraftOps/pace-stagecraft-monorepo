@@ -1,0 +1,181 @@
+name: "CI — transaction-service"
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "services/backend/transaction-service/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/backend/transaction-service/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-transaction-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  SERVICE_DIR: services/backend/transaction-service
+
+jobs:
+  lint-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: transaction-${{ hashFiles('services/backend/transaction-service/requirements*.txt') }}
+          restore-keys: |
+            transaction-pip-
+
+      - name: Install dependencies
+        working-directory: services/backend/transaction-service
+        run: pip install -e ".[dev]"
+
+      - name: Run ruff linter
+        working-directory: services/backend/transaction-service
+        run: ruff check . --output-format=github
+
+      - name: Run mypy strict type checker
+        working-directory: services/backend/transaction-service
+        run: mypy app/ --strict --ignore-missing-imports
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: lint-typecheck
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: transaction-${{ hashFiles('services/backend/transaction-service/requirements*.txt') }}
+          restore-keys: |
+            transaction-pip-
+
+      - name: Install dependencies
+        working-directory: services/backend/transaction-service
+        run: pip install -e ".[dev]"
+
+      - name: Run unit tests with 88% coverage threshold
+        working-directory: services/backend/transaction-service
+        run: |
+          pytest tests/unit/ -v \
+            --cov=app \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-fail-under=88 \
+            -x \
+            -k "not integration"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: transaction-service-coverage
+          path: |
+            services/backend/transaction-service/coverage.xml
+            services/backend/transaction-service/htmlcov/
+
+  compliance-test:
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: transaction-${{ hashFiles('services/backend/transaction-service/requirements*.txt') }}
+          restore-keys: |
+            transaction-pip-
+
+      - name: Install dependencies
+        working-directory: services/backend/transaction-service
+        run: pip install -e ".[dev]"
+
+      - name: Validate RESPA Section 8 kickback prohibition
+        working-directory: services/backend/transaction-service
+        run: python compliance/respa_section8_check.py
+
+      - name: Verify escrow disclosure requirements
+        working-directory: services/backend/transaction-service
+        run: python compliance/escrow_disclosure_check.py
+
+      - name: Run full compliance test suite
+        working-directory: services/backend/transaction-service
+        run: pytest tests/compliance/ -v --tb=long --junit-xml=compliance-results.xml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: transaction-compliance-results
+          path: services/backend/transaction-service/compliance-results.xml
+
+  security-scan:
+    needs: lint-typecheck
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: transaction-service
+      working_directory: services/backend/transaction-service
+      severity_threshold: HIGH
+    secrets: inherit
+
+  build:
+    needs: [unit-test, compliance-test]
+    uses: ./.github/workflows/_template-python-ci.yml
+    with:
+      service_name: transaction-service
+      python_version: "3.11"
+      working_directory: services/backend/transaction-service
+      run_integration: false
+    secrets: inherit
+
+  docker-build:
+    needs: [build, security-scan]
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: transaction-service
+      dockerfile_path: services/backend/transaction-service/Dockerfile
+      ecr_repository: stagecraft/transaction-service
+      image_tag: ${{ github.sha }}
+      push_image: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  integration-test:
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: transaction-service
+      test_suite: transaction-lifecycle
+      environment_url: http://localhost:8016
+      test_timeout_minutes: 30
+    secrets: inherit
+
+  deploy-staging:
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: transaction-service
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: backend
+      helm_chart_path: charts/transaction-service
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

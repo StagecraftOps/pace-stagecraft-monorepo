@@ -1,0 +1,291 @@
+# =============================================================================
+# CI ORCHESTRATOR  ·  Parent Pipeline
+# =============================================================================
+#
+#  DYNAMIC PIPELINE CONCEPT (GitLab equivalent in GitHub Actions)
+#  ─────────────────────────────────────────────────────────────
+#  GitLab lets you generate YAML at runtime ("dynamic child pipelines").
+#  GitHub Actions has no native equivalent, but the same result is achieved
+#  with the "Parent → Child reusable workflow" pattern:
+#
+#    PARENT (this file)
+#    └── detects WHICH service groups changed  (pure bash, no external script)
+#    └── builds a runtime matrix of those groups  (JSON constructed inline)
+#    └── fans out ONE job per group via  strategy.matrix
+#          Each matrix job calls the reusable child workflow ↓
+#
+#    CHILD  (ci-service-group.yml)
+#    └── receives the group name + its list of services as inputs
+#    └── runs its OWN matrix — one job per service — for lint / test / build
+#
+#  WHY THIS SOLVES THE 256-JOB LIMIT
+#  ─────────────────────────────────
+#  GitHub caps a single workflow's matrix at 256 jobs.
+#  With 300 + services a flat matrix would fail.
+#
+#  This design gives each child workflow its OWN independent 256-job budget:
+#    13 groups  ×  256 jobs/group  =  3 328 possible parallel jobs
+#
+#  Parent matrix  →  13 entries  (one per group folder)   ✅  well under 256
+#  Largest child  →  ~120 entries  (backend group)        ✅  under 256
+#
+#  FLOW
+#  ────
+#  push / PR
+#   └─► detect-changes          (outputs matrix JSON  e.g. groups to build)
+#         └─► build-shared       (shared packages, cached)
+#               └─► dispatch-groups  (parent matrix  – 1 job per group)
+#                     ├─► ci-service-group [analytics]   ← reusable workflow
+#                     ├─► ci-service-group [auth]
+#                     ├─► ci-service-group [backend]
+#                     └─► … (only changed groups)
+#                           └─► lint · test · build  (per service in group)
+#
+# =============================================================================
+
+name: "CI — Orchestrator (Parent)"
+
+on:
+  push:
+    branches: ["main", "develop", "release/**", "hotfix/**"]
+  pull_request:
+    branches: ["main", "develop"]
+  workflow_dispatch:
+    inputs:
+      force_all:
+        description: "Force-build ALL groups (skip change detection)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      target_group:
+        description: "Build ONE specific group only (e.g. backend). Leave blank for all."
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: "ci-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20"
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 1 · DETECT CHANGED GROUPS
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  Pure bash — no external script needed.
+  #  Compares HEAD vs the previous commit (or base branch on PRs).
+  #  Outputs a JSON matrix consumed by the parent matrix job below.
+  #
+  #  Output shape expected by dispatch-groups:
+  #    matrix  →  {"include":[{"group":"analytics","services":["svc-a","svc-b"]},…]}
+  #    has_changes  →  "true" | "false"
+  # ═══════════════════════════════════════════════════════════════════════════
+  detect-changes:
+    name: "🔍 Detect Changed Groups"
+    runs-on: ubuntu-latest
+    outputs:
+      matrix:       ${{ steps.build-matrix.outputs.matrix }}
+      has_changes:  ${{ steps.build-matrix.outputs.has_changes }}
+
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Determine changed files ───────────────────────────────────────────
+      - name: Detect changed files
+        id: changed-files
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE_REF="origin/${{ github.base_ref }}"
+            git fetch origin "${{ github.base_ref }}" --depth=1
+            CHANGED=$(git diff --name-only "$BASE_REF"...HEAD)
+          elif [[ "${{ github.event.before }}" == "0000000000000000000000000000000000000000" ]]; then
+            # First push on a new branch — treat everything as changed
+            CHANGED=$(git ls-files)
+          else
+            CHANGED=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}")
+          fi
+          echo "changed_files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$CHANGED"           >> "$GITHUB_OUTPUT"
+          echo "EOF"                >> "$GITHUB_OUTPUT"
+
+      # ── Build the parent matrix JSON ──────────────────────────────────────
+      - name: Build parent matrix
+        id: build-matrix
+        shell: bash
+        env:
+          FORCE_ALL:    ${{ github.event.inputs.force_all || 'false' }}
+          TARGET_GROUP: ${{ github.event.inputs.target_group || '' }}
+          CHANGED_FILES: ${{ steps.changed-files.outputs.changed_files }}
+        run: |
+          # ----------------------------------------------------------------
+          # All known service groups (= first-level folders under services/)
+          # ----------------------------------------------------------------
+          ALL_GROUPS=(analytics auth backend data frontend geo infra media messaging ml notification payment search)
+
+          declare -A GROUP_SERVICES   # group → space-separated service list
+          declare -A GROUP_CHANGED    # group → 1 if changed
+
+          # Discover every service directory that exists on disk
+          for group in "${ALL_GROUPS[@]}"; do
+            svcs=()
+            if [[ -d "services/$group" ]]; then
+              while IFS= read -r svc_path; do
+                svc_name=$(basename "$svc_path")
+                svcs+=("$svc_name")
+              done < <(find "services/$group" -mindepth 1 -maxdepth 1 -type d | sort)
+            fi
+            GROUP_SERVICES["$group"]="${svcs[*]}"
+          done
+
+          # Mark groups that have changed files
+          while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+            for group in "${ALL_GROUPS[@]}"; do
+              if [[ "$file" == services/$group/* || "$file" == packages/* ]]; then
+                GROUP_CHANGED["$group"]=1
+              fi
+            done
+          done <<< "$CHANGED_FILES"
+
+          # Shared-package changes → rebuild every group
+          if echo "$CHANGED_FILES" | grep -q "^packages/"; then
+            for group in "${ALL_GROUPS[@]}"; do
+              GROUP_CHANGED["$group"]=1
+            done
+          fi
+
+          # Honour manual overrides
+          if [[ "$FORCE_ALL" == "true" ]]; then
+            for group in "${ALL_GROUPS[@]}"; do GROUP_CHANGED["$group"]=1; done
+          fi
+          if [[ -n "$TARGET_GROUP" ]]; then
+            for group in "${ALL_GROUPS[@]}"; do unset GROUP_CHANGED["$group"]; done
+            GROUP_CHANGED["$TARGET_GROUP"]=1
+          fi
+
+          # Build JSON matrix
+          # Shape: {"include":[{"group":"analytics","services":"[\"svc-a\",\"svc-b\"]"},…]}
+          INCLUDES="[]"
+          HAS_CHANGES="false"
+
+          for group in "${ALL_GROUPS[@]}"; do
+            [[ -z "${GROUP_CHANGED[$group]+set}" ]] && continue
+            [[ -z "${GROUP_SERVICES[$group]}" ]]   && continue   # group folder empty
+
+            # Convert space-separated list to JSON array string
+            SVC_JSON="["
+            first=1
+            for svc in ${GROUP_SERVICES[$group]}; do
+              [[ $first -eq 0 ]] && SVC_JSON+=","
+              SVC_JSON+="\"$svc\""
+              first=0
+            done
+            SVC_JSON+="]"
+
+            ENTRY="{\"group\":\"$group\",\"services\":$(echo "$SVC_JSON" | jq -c .)}"
+            INCLUDES=$(echo "$INCLUDES" | jq -c --argjson e "$ENTRY" '. + [$e]')
+            HAS_CHANGES="true"
+          done
+
+          MATRIX="{\"include\":$INCLUDES}"
+          echo "matrix=$MATRIX"       >> "$GITHUB_OUTPUT"
+          echo "has_changes=$HAS_CHANGES" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo " Parent matrix preview"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "$MATRIX" | jq .
+          echo "has_changes = $HAS_CHANGES"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 2 · BUILD SHARED PACKAGES  (runs once, result cached for child jobs)
+  # ═══════════════════════════════════════════════════════════════════════════
+  # build-shared:
+  #   name: "📦 Build Shared Packages"
+  #   needs: detect-changes
+  #   if: needs.detect-changes.outputs.has_changes == 'true'
+  #   runs-on: ubuntu-latest
+
+  #   steps:
+  #     - uses: actions/checkout@v4
+
+  #     - uses: actions/setup-node@v4
+  #       with:
+  #         node-version: ${{ env.NODE_VERSION }}
+  #         cache: "npm"
+
+  #     - name: Install root dependencies
+  #       run: npm ci --ignore-scripts
+
+  #     - name: Build shared-types
+  #       run: npm run build --workspace=packages/shared-types
+
+  #     - name: Build shared-utils
+  #       run: npm run build --workspace=packages/shared-utils
+
+  #     # Cache the compiled output — child jobs restore from this key
+  #     - name: Save shared-package artifacts
+  #       uses: actions/cache/save@v4
+  #       with:
+  #         path: |
+  #           packages/shared-types/dist
+  #           packages/shared-utils/dist
+  #         key: shared-build-${{ github.sha }}
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 3 · PARENT MATRIX  — dispatch one child pipeline per changed group
+  # ═══════════════════════════════════════════════════════════════════════════
+  #
+  #  This is the "parent" side of the Parent→Child pattern.
+  #  strategy.matrix is populated DYNAMICALLY from Job 1's output.
+  #
+  #  Each matrix entry calls the REUSABLE CHILD workflow (workflow_call).
+  #  GitHub treats that child as a fully independent workflow run with its
+  #  own 256-job matrix budget — exactly like GitLab's "trigger:" keyword.
+  #
+  # ═══════════════════════════════════════════════════════════════════════════
+  dispatch-groups:
+    name: "🚀 Group · ${{ matrix.group }}"
+    needs: [detect-changes]
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    strategy:
+      fail-fast: false            # one group failing won't cancel the others
+      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+
+    # ── Call the reusable child workflow ────────────────────────────────────
+    uses: ./.github/workflows/ci-service-group.yml
+    with:
+      group:    ${{ matrix.group }}
+      services: ${{ toJson(matrix.services) }}
+      sha:      ${{ github.sha }}
+    secrets: inherit
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 4 · CI GATE  (required status check for branch protection)
+  # ═══════════════════════════════════════════════════════════════════════════
+  ci-gate:
+    name: "✅ CI Gate"
+    needs: dispatch-groups
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Evaluate results
+        shell: bash
+        run: |
+          STATUS="${{ needs.dispatch-groups.result }}"
+          echo "dispatch-groups result: $STATUS"
+          if [[ "$STATUS" == "failure" || "$STATUS" == "cancelled" ]]; then
+            echo "❌  One or more service groups failed CI."
+            exit 1
+          fi
+          echo "✅  All service groups passed CI."

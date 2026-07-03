@@ -1,0 +1,4 @@
+﻿# thumbnail-service
+
+Thumbnail generation
+

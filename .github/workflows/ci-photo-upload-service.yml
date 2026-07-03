@@ -1,0 +1,195 @@
+name: CI - Photo Upload Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/media/photo-upload-service/**"
+      - ".github/workflows/ci-photo-upload-service.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/media/photo-upload-service/**"
+      - ".github/workflows/ci-photo-upload-service.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/media/photo-upload-service
+  NODE_VERSION: "20"
+  COVERAGE_THRESHOLD: "83"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run lint -- --max-warnings 0
+
+      - name: Run Prettier check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run format:check
+
+      - name: Run TypeScript type check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run typecheck
+
+  unit-test:
+    name: Unit Tests (Jest, 83% coverage)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run Jest with coverage
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          npm run test -- \
+            --coverage \
+            --coverageThreshold='{"global":{"lines":${{ env.COVERAGE_THRESHOLD }}}}' \
+            --testPathPattern=tests/unit \
+            --reporters=default \
+            --reporters=jest-junit
+        env:
+          JEST_JUNIT_OUTPUT_DIR: ./test-results
+          JEST_JUNIT_OUTPUT_NAME: unit-results.xml
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_REGION: us-east-1
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: ${{ env.SERVICE_DIR }}/test-results/unit-results.xml
+
+  s3-policy-validation:
+    name: S3 Bucket Policy Validation
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Install AWS CLI and policy analysis tools
+        run: |
+          pip install awscli boto3 cfn-lint checkov
+
+      - name: Validate S3 bucket policy - authenticated puts only
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          node scripts/validate-s3-policy.js \
+            --policy-file config/s3-bucket-policy.json \
+            --require-authenticated-puts \
+            --deny-public-acl
+
+      - name: Validate S3 blocks public access
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          node scripts/validate-s3-public-access-block.js \
+            --config config/s3-config.json \
+            --assert-block-public-acls \
+            --assert-block-public-policy
+
+      - name: Validate multipart upload size limits
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: node scripts/validate-upload-limits.js --max-file-size-mb 50 --allowed-types jpg,jpeg,png,webp,heic
+
+      - name: Validate CloudFront invalidation permissions
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          node scripts/validate-cloudfront-config.js \
+            --distribution-config config/cloudfront.json \
+            --check-invalidation-iam-role
+
+      - name: Run S3 CORS policy check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: node scripts/validate-s3-cors.js --cors-file config/s3-cors.json --allowed-origins-file config/allowed-origins.json
+
+  docker-build:
+    name: Docker Build
+    needs: s3-policy-validation
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service-name: photo-upload-service
+      dockerfile-path: services/media/photo-upload-service/Dockerfile
+      context-path: services/media/photo-upload-service
+      image-tag: ${{ github.sha }}
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service-name: photo-upload-service
+      service-dir: services/media/photo-upload-service
+      compose-file: services/media/photo-upload-service/docker-compose.test.yml
+      test-command: "npm run test:integration"
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      service-name: photo-upload-service
+      environment: staging
+      image-tag: ${{ github.sha }}
+      namespace: media-staging
+      helm-values-file: services/media/photo-upload-service/helm/values-staging.yaml
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [lint, unit-test, s3-policy-validation, docker-build, integration-test, deploy-staging]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service-name: photo-upload-service
+      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      channel: "#media-ci"
+    secrets: inherit

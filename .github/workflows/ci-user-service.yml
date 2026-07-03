@@ -1,0 +1,160 @@
+name: "CI — user-service"
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "services/backend/user-service/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/backend/user-service/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-user-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.22"
+  SERVICE_DIR: services/backend/user-service
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-user-${{ hashFiles('services/backend/user-service/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-user-
+
+      - name: Download Go modules
+        run: cd services/backend/user-service && go mod download
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          working-directory: services/backend/user-service
+          args: --timeout 5m --config ../../.golangci.yml
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-user-${{ hashFiles('services/backend/user-service/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-user-
+
+      - name: Run unit tests with race detector
+        run: |
+          cd services/backend/user-service
+          go test -race -count=1 -coverprofile=coverage.out -covermode=atomic -timeout 5m ./...
+
+      - name: Assert 85% coverage threshold
+        run: |
+          cd services/backend/user-service
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
+          echo "Coverage: $COVERAGE%"
+          awk "BEGIN{exit ($COVERAGE < 85)}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: user-service-coverage
+          path: services/backend/user-service/coverage.out
+
+  pii-audit:
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PII audit tools
+        run: pip install bandit ast-grep
+
+      - name: Scan Go structs for unencrypted PII fields
+        run: |
+          python scripts/pii_audit.py \
+            services/backend/user-service/internal/ \
+            --check-encryption
+
+      - name: Verify GDPR DeleteUser cascade
+        run: python scripts/gdpr_deletion_test.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: user-service-pii-audit
+          path: pii-audit-report.txt
+
+  security-scan:
+    needs: lint
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: user-service
+      working_directory: services/backend/user-service
+      severity_threshold: HIGH
+    secrets: inherit
+
+  build:
+    needs: [unit-test, pii-audit]
+    uses: ./.github/workflows/_template-go-ci.yml
+    with:
+      service_name: user-service
+      go_version: "1.22"
+      working_directory: services/backend/user-service
+    secrets: inherit
+
+  docker-build:
+    needs: [build, security-scan]
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: user-service
+      dockerfile_path: services/backend/user-service/Dockerfile
+      ecr_repository: stagecraft/user-service
+      image_tag: ${{ github.sha }}
+      push_image: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  integration-test:
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: user-service
+      test_suite: user-crud
+      environment_url: http://localhost:8013
+      test_timeout_minutes: 15
+    secrets: inherit
+
+  deploy-staging:
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: user-service
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: backend
+      helm_chart_path: charts/user-service
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

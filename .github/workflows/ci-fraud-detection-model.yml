@@ -1,0 +1,171 @@
+name: "CI — fraud-detection-model"
+
+on:
+  push:
+    paths:
+      - "services/ml/fraud-detection-model/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/ml/fraud-detection-model/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-fraud-model-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: fraud-model-${{ hashFiles('services/ml/fraud-detection-model/requirements*.txt') }}
+          restore-keys: fraud-model-
+      - name: Install package with dev extras
+        run: pip install -e ".[dev]"
+        working-directory: services/ml/fraud-detection-model
+      - name: Lint with ruff
+        run: ruff check . --output-format=github
+        working-directory: services/ml/fraud-detection-model
+      - name: Type check with mypy
+        run: mypy src/ --ignore-missing-imports
+        working-directory: services/ml/fraud-detection-model
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: [lint-typecheck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: fraud-model-${{ hashFiles('services/ml/fraud-detection-model/requirements*.txt') }}
+          restore-keys: fraud-model-
+      - name: Install package with dev extras
+        run: pip install -e ".[dev]"
+        working-directory: services/ml/fraud-detection-model
+      - name: Run unit tests with coverage
+        run: pytest tests/unit/ -v --cov=src --cov-report=xml --cov-fail-under=85
+        working-directory: services/ml/fraud-detection-model
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: fraud-model-coverage
+          path: services/ml/fraud-detection-model/coverage.xml
+
+  model-evaluation:
+    runs-on: ubuntu-latest
+    needs: [lint-typecheck, unit-test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: fraud-model-${{ hashFiles('services/ml/fraud-detection-model/requirements*.txt') }}
+          restore-keys: fraud-model-
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-1
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+      - name: Install ML extras
+        run: pip install -e ".[dev]" xgboost scikit-learn
+        working-directory: services/ml/fraud-detection-model
+      - name: Evaluate fraud detection model (AUC, precision@recall-99)
+        run: >
+          python scripts/evaluate_fraud_model.py
+          --model s3://ml-models-staging/fraud/candidate
+          --test-data data/fixtures/fraud_test.parquet
+          --output fraud_metrics.json
+        working-directory: services/ml/fraud-detection-model
+      - name: Check fraud thresholds (AUC >= 0.97, precision@recall-99 >= 0.20)
+        run: >
+          python scripts/check_fraud_thresholds.py
+          --metrics fraud_metrics.json
+          --min-auc 0.97
+          --min-precision-at-recall-99 0.20
+        working-directory: services/ml/fraud-detection-model
+      - name: Upload fraud evaluation metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: fraud-model-metrics
+          path: services/ml/fraud-detection-model/fraud_metrics.json
+
+  fairness-check:
+    runs-on: ubuntu-latest
+    needs: [model-evaluation]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: fraud-model-${{ hashFiles('services/ml/fraud-detection-model/requirements*.txt') }}
+          restore-keys: fraud-model-
+      - name: Install fairlearn
+        run: pip install -e ".[dev]" fairlearn
+        working-directory: services/ml/fraud-detection-model
+      - name: Run fairness audit (FPR disparity <= 2% across age_group, geography)
+        run: >
+          python scripts/fairness_audit.py
+          --model s3://ml-models-staging/fraud/candidate
+          --protected-attrs age_group geography
+          --max-fpr-disparity 0.02
+        working-directory: services/ml/fraud-detection-model
+      - name: Upload fairness report
+        uses: actions/upload-artifact@v4
+        with:
+          name: fraud-model-fairness
+          path: services/ml/fraud-detection-model/fairness_report.html
+
+  security-scan:
+    needs: [lint-typecheck]
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: fraud-detection-model
+      working_directory: services/ml/fraud-detection-model
+      severity_threshold: HIGH
+    secrets: inherit
+
+  build:
+    needs: [model-evaluation, fairness-check, security-scan]
+    uses: ./.github/workflows/_template-python-ci.yml
+    with:
+      service_name: fraud-detection-model
+      python_version: "3.11"
+      working_directory: services/ml/fraud-detection-model
+      run_integration: true
+    secrets: inherit
+
+  deploy-staging:
+    needs: [build]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: fraud-detection-model
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: ml
+      helm_chart_path: charts/fraud-detection-model
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

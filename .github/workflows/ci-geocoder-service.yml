@@ -1,0 +1,193 @@
+name: CI - Geocoder Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/geo/geocoder-service/**"
+      - ".github/workflows/ci-geocoder-service.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/geo/geocoder-service/**"
+      - ".github/workflows/ci-geocoder-service.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/geo/geocoder-service
+  GO_VERSION: "1.22"
+  COVERAGE_THRESHOLD: "82"
+  MAX_GEOCODING_ERROR_METERS: "10"
+
+jobs:
+  lint:
+    name: Lint (golangci-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/go.sum
+
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | \
+            sh -s -- -b $(go env GOPATH)/bin v1.57.2
+
+      - name: Run golangci-lint
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: golangci-lint run --timeout 5m ./...
+
+      - name: Run go vet
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go vet ./...
+
+      - name: Run staticcheck
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+
+  unit-test:
+    name: Unit Tests (go test, 82% coverage)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/go.sum
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('services/geo/geocoder-service/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Run unit tests with coverage
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          go test -coverprofile=coverage.out -covermode=atomic ./...
+          go tool cover -func=coverage.out | grep total | awk '{print $3}' | \
+            awk -F'%' '{if ($1 < ${{ env.COVERAGE_THRESHOLD }}) {print "Coverage "$1"% below threshold ${{ env.COVERAGE_THRESHOLD }}%"; exit 1} else {print "Coverage "$1"% OK"}}'
+        env:
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_TEST_API_KEY }}
+          HERE_MAPS_API_KEY: ${{ secrets.HERE_MAPS_TEST_API_KEY }}
+          USE_MOCK_GEOCODER: "true"
+
+      - name: Generate coverage report
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go tool cover -html=coverage.out -o coverage.html
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: ${{ env.SERVICE_DIR }}/coverage.html
+
+  geocoding-accuracy-test:
+    name: Geocoding Accuracy Tests (precision within 10m)
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/go.sum
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('services/geo/geocoder-service/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Run geocoding precision tests
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          go test -v -run TestGeocodingPrecision ./tests/accuracy/... \
+            -args -max-error-meters=${{ env.MAX_GEOCODING_ERROR_METERS }} \
+                  -test-addresses-file=tests/fixtures/us_addresses_1000.jsonl
+        env:
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_TEST_API_KEY }}
+
+      - name: Run reverse geocoding accuracy tests
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          go test -v -run TestReverseGeocodingAccuracy ./tests/accuracy/... \
+            -args -max-error-meters=${{ env.MAX_GEOCODING_ERROR_METERS }}
+        env:
+          HERE_MAPS_API_KEY: ${{ secrets.HERE_MAPS_TEST_API_KEY }}
+
+      - name: Validate geocoding fallback chain
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go test -v -run TestFallbackChain ./tests/accuracy/...
+
+      - name: Validate batch geocoding throughput
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go test -v -run TestBatchThroughput -timeout 120s ./tests/performance/...
+
+  docker-build:
+    name: Docker Build
+    needs: geocoding-accuracy-test
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service-name: geocoder-service
+      dockerfile-path: services/geo/geocoder-service/Dockerfile
+      context-path: services/geo/geocoder-service
+      image-tag: ${{ github.sha }}
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service-name: geocoder-service
+      service-dir: services/geo/geocoder-service
+      compose-file: services/geo/geocoder-service/docker-compose.test.yml
+      test-command: "go test -v -timeout 300s ./tests/integration/..."
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      service-name: geocoder-service
+      environment: staging
+      image-tag: ${{ github.sha }}
+      namespace: geo-staging
+      helm-values-file: services/geo/geocoder-service/helm/values-staging.yaml
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [lint, unit-test, geocoding-accuracy-test, docker-build, integration-test, deploy-staging]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service-name: geocoder-service
+      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      channel: "#geo-ci"
+    secrets: inherit

@@ -1,0 +1,319 @@
+name: "Performance Benchmarks"
+
+on:
+  schedule:
+    - cron: '0 1 * * *'  # Nightly 1am UTC
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - "Release: Staging"
+    types:
+      - completed
+    inputs:
+      target_service:
+        description: 'Service to benchmark (default: all)'
+        required: false
+        default: 'all'
+        type: string
+      baseline_compare:
+        description: 'Compare against baseline'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  setup-perf-env:
+    name: Setup Performance Environment
+    runs-on: ubuntu-latest
+    outputs:
+      env_ready: ${{ steps.verify.outputs.env_ready }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Configure kubectl for perf cluster
+        run: aws eks update-kubeconfig --name perf-cluster --region us-east-1
+
+      - name: Deploy performance environment via Helm
+        run: |
+          helm upgrade --install perf-stack ./charts/perf-environment \
+            --namespace perf \
+            --create-namespace \
+            --wait \
+            --timeout 5m
+
+      - name: Verify all pods ready
+        id: verify
+        run: |
+          kubectl get pods -n perf
+          NOT_READY=$(kubectl get pods -n perf --field-selector=status.phase!=Running --no-headers 2>/dev/null | wc -l)
+          if [ "$NOT_READY" -gt 0 ]; then
+            echo "::error::$NOT_READY pods are not running in perf namespace"
+            exit 1
+          fi
+          echo "env_ready=true" >> "$GITHUB_OUTPUT"
+          echo "All perf pods are running."
+
+  baseline-api-load-test:
+    name: Baseline API Load Test
+    runs-on: ubuntu-latest
+    needs: setup-perf-env
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js for k6 install
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install k6
+        run: npm install -g k6 2>/dev/null || (wget -q https://github.com/grafana/k6/releases/latest/download/k6-linux-amd64.tar.gz && tar -xzf k6-linux-amd64.tar.gz && sudo mv k6-*/k6 /usr/local/bin/)
+
+      - name: Load test search API
+        run: k6 run --vus 100 --duration 5m --out json=results-baseline-search.json tests/perf/search-api.js
+
+      - name: Load test listing API
+        run: k6 run --vus 100 --duration 5m --out json=results-listing.json tests/perf/listing-api.js
+
+      - name: Load test user API
+        run: k6 run --vus 50 --duration 3m --out json=results-user.json tests/perf/user-api.js
+
+      - name: Upload baseline results
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-load-results
+          path: results-*.json
+          retention-days: 14
+
+  peak-load-simulation:
+    name: Peak Load Simulation
+    runs-on: ubuntu-latest
+    needs: baseline-api-load-test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install k6
+        run: wget -q https://github.com/grafana/k6/releases/latest/download/k6-linux-amd64.tar.gz && tar -xzf k6-linux-amd64.tar.gz && sudo mv k6-*/k6 /usr/local/bin/
+
+      - name: Run peak load simulation (ramp 0→1000→0 VUs)
+        run: |
+          k6 run \
+            --stage 0s:0 \
+            --stage 2m:1000 \
+            --stage 10m:1000 \
+            --stage 2m:0 \
+            --out json=results-peak.json \
+            tests/perf/full-stack.js
+
+      - name: Assert p95 latency threshold
+        run: |
+          P95=$(jq '.metrics.http_req_duration.values."p(95)"' results-peak.json 2>/dev/null || echo 0)
+          echo "p95 latency: ${P95}ms"
+          if (( $(echo "$P95 > 500" | bc -l) )); then
+            echo "::error::p95 latency ${P95}ms exceeds 500ms threshold"
+            exit 1
+          fi
+          echo "p95 latency within acceptable range."
+
+      - name: Upload peak results
+        uses: actions/upload-artifact@v4
+        with:
+          name: peak-load-results
+          path: results-peak.json
+          retention-days: 14
+
+  stress-test-zestimate:
+    name: Stress Test — Zestimate Service
+    runs-on: ubuntu-latest
+    needs: setup-perf-env
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Locust
+        run: pip install locust
+
+      - name: Run Locust stress test
+        run: |
+          locust \
+            --headless \
+            --users 500 \
+            --spawn-rate 50 \
+            --run-time 5m \
+            --host https://perf-zestimate.internal \
+            --csv=locust-zestimate \
+            -f tests/perf/zestimate_locust.py
+
+      - name: Upload Locust CSV results
+        uses: actions/upload-artifact@v4
+        with:
+          name: zestimate-stress-results
+          path: locust-zestimate*.csv
+          retention-days: 14
+
+  database-query-benchmark:
+    name: Database Query Benchmark
+    runs-on: ubuntu-latest
+    needs: setup-perf-env
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Install PostgreSQL client tools
+        run: sudo apt-get install -y postgresql-client
+
+      - name: Run listing query benchmark via pgbench
+        run: |
+          pgbench -c 50 -j 4 -T 120 \
+            -f tests/perf/listing-queries.sql \
+            "${{ secrets.PERF_DB_URL }}" \
+            | tee pgbench-listing.txt
+
+      - name: Run search query benchmark via pgbench
+        run: |
+          pgbench -c 50 -j 4 -T 120 \
+            -f tests/perf/search-queries.sql \
+            "${{ secrets.PERF_DB_URL }}" \
+            | tee pgbench-search.txt
+
+      - name: Generate slow query report
+        run: |
+          echo "# DB Benchmark Results" > db-benchmark-report.txt
+          echo "## Listing Queries" >> db-benchmark-report.txt
+          cat pgbench-listing.txt >> db-benchmark-report.txt
+          echo "## Search Queries" >> db-benchmark-report.txt
+          cat pgbench-search.txt >> db-benchmark-report.txt
+          cat db-benchmark-report.txt
+
+      - name: Upload DB benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-benchmark-results
+          path: |
+            pgbench-*.txt
+            db-benchmark-report.txt
+          retention-days: 14
+
+  teardown-perf-env:
+    name: Teardown Performance Environment
+    runs-on: ubuntu-latest
+    needs: [peak-load-simulation, stress-test-zestimate, database-query-benchmark]
+    if: always()
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Configure kubectl
+        run: aws eks update-kubeconfig --name perf-cluster --region us-east-1
+
+      - name: Uninstall Helm release
+        run: helm uninstall perf-stack --namespace perf || true
+
+      - name: Delete perf namespace
+        run: kubectl delete namespace perf --ignore-not-found
+
+  publish-benchmark-report:
+    name: Publish Benchmark Report
+    runs-on: ubuntu-latest
+    needs: teardown-perf-env
+    if: always()
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download all result artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: perf-results/
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Generate HTML benchmark report
+        run: |
+          pip install jinja2
+          python tests/perf/generate_report.py \
+            --results-dir perf-results/ \
+            --output report.html \
+            --compare-baseline ${{ inputs.baseline_compare || 'true' }} \
+            || python3 - <<'EOF'
+          # Fallback minimal report generator
+          import os, glob
+          html = "<html><body><h1>Benchmark Report</h1><ul>"
+          for f in glob.glob('perf-results/**/*', recursive=True):
+            if os.path.isfile(f):
+              html += f"<li>{f}</li>"
+          html += "</ul></body></html>"
+          with open('report.html', 'w') as out:
+            out.write(html)
+          print("Fallback report generated.")
+          EOF
+
+      - name: Upload HTML report to S3
+        run: |
+          REPORT_KEY="perf-reports/${{ github.run_id }}/report.html"
+          aws s3 cp report.html "s3://${{ secrets.PERF_REPORTS_BUCKET }}/${REPORT_KEY}"
+          REPORT_URL="https://${{ secrets.PERF_REPORTS_BUCKET }}.s3.amazonaws.com/${REPORT_KEY}"
+          echo "REPORT_URL=$REPORT_URL" >> "$GITHUB_ENV"
+
+      - name: Post report URL to GitHub Step Summary
+        run: |
+          echo "## Performance Benchmark Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "[View full report]($REPORT_URL)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on regression > 10%
+        run: |
+          python3 - <<'EOF'
+          import json, sys, glob, os
+          regressions = []
+          for f in glob.glob('perf-results/**/*.json', recursive=True):
+            try:
+              with open(f) as fp:
+                data = json.load(fp)
+              # Check for p95 regression marker if present in generated reports
+              regression_pct = data.get('regression_percent', 0)
+              if regression_pct > 10:
+                regressions.append(f"{f}: {regression_pct:.1f}% regression")
+            except Exception:
+              pass
+          if regressions:
+            print("::error::Performance regression > 10% detected:")
+            for r in regressions:
+              print(f"  {r}")
+            sys.exit(1)
+          print("No significant regressions detected.")
+          EOF

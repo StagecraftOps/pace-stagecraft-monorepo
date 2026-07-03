@@ -1,0 +1,176 @@
+name: CI - Stripe Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/payment/stripe-service/**"
+      - ".github/workflows/ci-stripe-service.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/payment/stripe-service/**"
+      - ".github/workflows/ci-stripe-service.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/payment/stripe-service
+  NODE_VERSION: "20"
+  COVERAGE_THRESHOLD: "88"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run lint -- --max-warnings 0
+
+      - name: Run Prettier check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run format:check
+
+      - name: Run TypeScript type check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run typecheck
+
+  unit-test:
+    name: Unit Tests (Jest, 88% coverage)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run Jest with coverage
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          npm run test -- \
+            --coverage \
+            --coverageThreshold='{"global":{"lines":${{ env.COVERAGE_THRESHOLD }}}}' \
+            --testPathPattern=tests/unit \
+            --reporters=default \
+            --reporters=jest-junit
+        env:
+          JEST_JUNIT_OUTPUT_DIR: ./test-results
+          JEST_JUNIT_OUTPUT_NAME: unit-results.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: ${{ env.SERVICE_DIR }}/test-results/unit-results.xml
+
+  webhook-signature-test:
+    name: Webhook Signature Verification Tests
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run Stripe webhook HMAC verification tests
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          npm run test:webhook-sig -- \
+            --testPathPattern=tests/webhook \
+            --forceExit \
+            --verbose
+        env:
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET_TEST }}
+          STRIPE_TEST_CLOCK_ENABLED: "true"
+
+      - name: Validate webhook event schema coverage
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: node scripts/validate-webhook-schemas.js --check-all-event-types
+
+      - name: Test replay attack prevention
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: node scripts/test-replay-prevention.js --tolerance-seconds 300
+
+  docker-build:
+    name: Docker Build
+    needs: webhook-signature-test
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service-name: stripe-service
+      dockerfile-path: services/payment/stripe-service/Dockerfile
+      context-path: services/payment/stripe-service
+      image-tag: ${{ github.sha }}
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service-name: stripe-service
+      service-dir: services/payment/stripe-service
+      compose-file: services/payment/stripe-service/docker-compose.test.yml
+      test-command: "npm run test:integration"
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      service-name: stripe-service
+      environment: staging
+      image-tag: ${{ github.sha }}
+      namespace: payments-staging
+      helm-values-file: services/payment/stripe-service/helm/values-staging.yaml
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [lint, unit-test, webhook-signature-test, docker-build, integration-test, deploy-staging]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service-name: stripe-service
+      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      channel: "#payments-ci"
+    secrets: inherit

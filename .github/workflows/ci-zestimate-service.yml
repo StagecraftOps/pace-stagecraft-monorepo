@@ -1,0 +1,191 @@
+name: "CI — zestimate-service"
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "services/backend/zestimate-service/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/backend/zestimate-service/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-zestimate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  SERVICE_DIR: services/backend/zestimate-service
+
+jobs:
+  lint-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: zestimate-${{ hashFiles('services/backend/zestimate-service/requirements*.txt') }}
+          restore-keys: |
+            zestimate-pip-
+
+      - name: Install dependencies
+        working-directory: services/backend/zestimate-service
+        run: pip install -e ".[dev]"
+
+      - name: Run ruff linter
+        working-directory: services/backend/zestimate-service
+        run: ruff check . --output-format=github
+
+      - name: Run mypy type checker
+        working-directory: services/backend/zestimate-service
+        run: mypy app/ --ignore-missing-imports
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: lint-typecheck
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: zestimate-${{ hashFiles('services/backend/zestimate-service/requirements*.txt') }}
+          restore-keys: |
+            zestimate-pip-
+
+      - name: Install dependencies
+        working-directory: services/backend/zestimate-service
+        run: pip install -e ".[dev]"
+
+      - name: Run unit tests with 87% coverage threshold
+        working-directory: services/backend/zestimate-service
+        run: pytest tests/unit/ -v --cov=app --cov-report=xml --cov-report=html --cov-fail-under=87 -x
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zestimate-service-coverage
+          path: |
+            services/backend/zestimate-service/coverage.xml
+            services/backend/zestimate-service/htmlcov/
+
+  model-health-check:
+    runs-on: ubuntu-latest
+    needs: lint-typecheck
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: zestimate-${{ hashFiles('services/backend/zestimate-service/requirements*.txt') }}
+          restore-keys: |
+            zestimate-pip-
+
+      - name: Install dependencies with ML packages
+        working-directory: services/backend/zestimate-service
+        run: pip install -e ".[dev]" boto3 numpy
+
+      - name: Download and validate AVM model
+        working-directory: services/backend/zestimate-service
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          python scripts/validate_avm_model.py \
+            --bucket ml-models-prod \
+            --key avm/latest/model.pkl \
+            --test-fixtures tests/fixtures/zestimate_test_cases.json \
+            --max-mape 5.0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zestimate-model-validation-report
+          path: services/backend/zestimate-service/model_validation_report.json
+
+  security-scan:
+    needs: lint-typecheck
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: zestimate-service
+      working_directory: services/backend/zestimate-service
+      severity_threshold: MEDIUM
+    secrets: inherit
+
+  build:
+    needs: unit-test
+    uses: ./.github/workflows/_template-python-ci.yml
+    with:
+      service_name: zestimate-service
+      python_version: "3.11"
+      working_directory: services/backend/zestimate-service
+      run_integration: false
+    secrets: inherit
+
+  docker-build:
+    needs: [build, security-scan]
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: zestimate-service
+      dockerfile_path: services/backend/zestimate-service/Dockerfile
+      ecr_repository: stagecraft/zestimate-service
+      image_tag: ${{ github.sha }}
+      push_image: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  load-test:
+    runs-on: ubuntu-latest
+    needs: docker-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install k6
+        run: npm install -g k6
+
+      - name: Run zestimate load test (100 VUs, 2 minutes)
+        run: |
+          k6 run \
+            --vus 100 \
+            --duration 2m \
+            --summary-export=zestimate-k6-summary.json \
+            services/backend/zestimate-service/tests/perf/zestimate-load.js
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zestimate-load-test-results
+          path: zestimate-k6-summary.json
+
+  deploy-staging:
+    needs: [load-test, model-health-check]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: zestimate-service
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: backend
+      helm_chart_path: charts/zestimate-service
+      replicas: 3
+      wait_for_rollout: true
+    secrets: inherit

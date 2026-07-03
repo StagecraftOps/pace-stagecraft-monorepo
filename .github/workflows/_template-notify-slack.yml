@@ -1,0 +1,139 @@
+name: "Template: Slack Deployment Notification"
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      status:
+        required: true
+        type: string
+      image_tag:
+        required: false
+        type: string
+        default: ""
+      deploy_url:
+        required: false
+        type: string
+        default: ""
+      triggered_by:
+        required: false
+        type: string
+        default: ${{ github.actor }}
+    secrets:
+      SLACK_WEBHOOK_URL:
+        required: false
+
+jobs:
+  notify-slack:
+    name: "Notify Slack — ${{ inputs.service_name }} (${{ inputs.status }})"
+    runs-on: ubuntu-latest
+    if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
+
+    steps:
+      - name: Checkout repository (for commit info)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 10
+
+      - name: Get recent changelog
+        id: changelog
+        run: |
+          CHANGELOG=$(git log --oneline -5 --pretty=format:"• %s (%an)" | head -5)
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Determine status emoji and color
+        id: status-meta
+        run: |
+          case "${{ inputs.status }}" in
+            SUCCESS|success)
+              echo "emoji=✅" >> $GITHUB_OUTPUT
+              echo "color=#36a64f" >> $GITHUB_OUTPUT
+              ;;
+            FAILURE|failure|FAILED|failed)
+              echo "emoji=❌" >> $GITHUB_OUTPUT
+              echo "color=#ff0000" >> $GITHUB_OUTPUT
+              ;;
+            ROLLBACK|rollback)
+              echo "emoji=⏪" >> $GITHUB_OUTPUT
+              echo "color=#ff9900" >> $GITHUB_OUTPUT
+              ;;
+            IN_PROGRESS|in_progress)
+              echo "emoji=🔄" >> $GITHUB_OUTPUT
+              echo "color=#0066cc" >> $GITHUB_OUTPUT
+              ;;
+            AUDIT_COMPLETE|audit_complete)
+              echo "emoji=🔍" >> $GITHUB_OUTPUT
+              echo "color=#9933cc" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "emoji=ℹ️" >> $GITHUB_OUTPUT
+              echo "color=#cccccc" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Format and send Slack notification
+        run: |
+          DEPLOY_URL_BLOCK=""
+          if [ -n "${{ inputs.deploy_url }}" ]; then
+            DEPLOY_URL_BLOCK="{\"type\":\"section\",\"fields\":[{\"type\":\"mrkdwn\",\"text\":\"*Deploy URL:*\n<${{ inputs.deploy_url }}|Open Service>\"}]},"
+          fi
+
+          PAYLOAD=$(cat <<EOF
+          {
+            "attachments": [
+              {
+                "color": "${{ steps.status-meta.outputs.color }}",
+                "blocks": [
+                  {
+                    "type": "header",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "${{ steps.status-meta.outputs.emoji }} Deployment ${{ inputs.status }} — ${{ inputs.service_name }}"
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "fields": [
+                      {"type": "mrkdwn", "text": "*Service:*\n${{ inputs.service_name }}"},
+                      {"type": "mrkdwn", "text": "*Environment:*\n${{ inputs.environment }}"},
+                      {"type": "mrkdwn", "text": "*Image Tag:*\n\`${{ inputs.image_tag }}\`"},
+                      {"type": "mrkdwn", "text": "*Triggered By:*\n${{ inputs.triggered_by }}"},
+                      {"type": "mrkdwn", "text": "*Commit:*\n\`${{ github.sha }}\`"},
+                      {"type": "mrkdwn", "text": "*Timestamp:*\n$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+                    ]
+                  },
+                  {
+                    "type": "section",
+                    "text": {
+                      "type": "mrkdwn",
+                      "text": "*Recent Changes:*\n${{ steps.changelog.outputs.changelog }}"
+                    }
+                  },
+                  {
+                    "type": "actions",
+                    "elements": [
+                      {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "View Workflow"},
+                        "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+          )
+
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "${{ secrets.SLACK_WEBHOOK_URL }}"

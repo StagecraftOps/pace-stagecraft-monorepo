@@ -1,0 +1,45 @@
+{
+  "name": "zillow-multiservice-monorepo",
+  "version": "1.0.0",
+  "description": "Zillow Dynamic Pipelines - Multiservice Monorepo with 300+ services",
+  "private": true,
+  "workspaces": [
+    "services/backend/**",
+    "services/frontend/**",
+    "services/data/**",
+    "services/ml/**",
+    "services/infra/**",
+    "services/messaging/**",
+    "services/auth/**",
+    "services/search/**",
+    "services/media/**",
+    "services/notification/**",
+    "services/analytics/**",
+    "services/payment/**",
+    "services/geo/**",
+    "packages/**"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "dev": "turbo run dev --parallel",
+    "clean": "turbo run clean",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "generate": "node scripts/generate-services.js"
+  },
+  "devDependencies": {
+    "turbo": "^1.13.0",
+    "prettier": "^3.2.5",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.5",
+    "husky": "^9.0.11",
+    "lint-staged": "^15.2.2"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}
+
+

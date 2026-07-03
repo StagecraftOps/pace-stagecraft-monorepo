@@ -1,0 +1,186 @@
+name: "Infrastructure: Terraform Apply"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "infra/**"
+      - "terraform/**"
+  workflow_dispatch:
+
+concurrency:
+  group: terraform-apply
+  cancel-in-progress: false
+
+jobs:
+  validate-plan:
+    name: "Validate Saved Terraform Plans"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.8.3"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Terraform Init (staging)
+        run: |
+          cd infra/staging
+          terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" -backend-config="key=staging/terraform.tfstate"
+
+      - name: Generate fresh staging plan for apply
+        run: |
+          cd infra/staging
+          terraform plan -out=staging.tfplan -no-color
+          terraform show staging.tfplan
+
+  apply-staging:
+    name: "Terraform Apply — Staging"
+    needs: validate-plan
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      staging_outputs: ${{ steps.outputs.outputs.json }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.8.3"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Terraform Init
+        run: |
+          cd infra/staging
+          terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" -backend-config="key=staging/terraform.tfstate"
+
+      - name: Terraform Apply (staging)
+        run: |
+          cd infra/staging
+          terraform apply -auto-approve -no-color staging.tfplan
+
+      - name: Capture Terraform outputs
+        id: outputs
+        run: |
+          cd infra/staging
+          OUTPUTS=$(terraform output -json)
+          echo "json=$OUTPUTS" >> $GITHUB_OUTPUT
+
+  smoke-test-staging:
+    name: "Smoke Test — Staging Infra"
+    needs: apply-staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Test EKS cluster connectivity
+        run: |
+          aws eks update-kubeconfig --name staging-eks-cluster --region us-east-1
+          kubectl cluster-info
+          kubectl get nodes --no-headers | awk '{print $2}' | grep -v "NotReady" | wc -l | xargs -I{} bash -c 'if [ {} -lt 3 ]; then echo "ERROR: Less than 3 nodes ready"; exit 1; fi'
+
+      - name: Test RDS connectivity
+        run: |
+          aws rds describe-db-instances \
+            --query "DBInstances[*].[DBInstanceIdentifier,DBInstanceStatus]" \
+            --output text | grep "available" | wc -l | xargs -I{} bash -c 'echo "RDS instances available: {}"'
+
+      - name: Test ElastiCache connectivity
+        run: |
+          aws elasticache describe-cache-clusters \
+            --query "CacheClusters[*].[CacheClusterId,CacheClusterStatus]" \
+            --output text | grep "available" || echo "No ElastiCache clusters found (may be ok)"
+
+  apply-production:
+    name: "Terraform Apply — Production"
+    needs: smoke-test-staging
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.8.3"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Terraform Init
+        run: |
+          cd infra/production
+          terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" -backend-config="key=production/terraform.tfstate"
+
+      - name: Terraform Plan (fresh for production)
+        run: |
+          cd infra/production
+          terraform plan -out=prod.tfplan -no-color
+
+      - name: Terraform Apply (production)
+        run: |
+          cd infra/production
+          terraform apply -auto-approve -no-color prod.tfplan
+
+  verify-production:
+    name: "Verify Production Services Post-Infra"
+    needs: apply-production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Verify all production services are healthy
+        run: |
+          aws eks update-kubeconfig --name prod-eks-cluster --region us-east-1
+          UNHEALTHY=$(kubectl get pods -n production --field-selector=status.phase!=Running --no-headers 2>/dev/null | wc -l)
+          if [ "$UNHEALTHY" -gt "0" ]; then
+            echo "WARNING: $UNHEALTHY pods are not in Running state"
+            kubectl get pods -n production --field-selector=status.phase!=Running
+          fi
+          echo "Production cluster health check complete"
+
+  notify-complete:
+    name: "Notify Infra Apply Complete"
+    needs: verify-production
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service_name: "Infrastructure (Terraform)"
+      environment: production
+      status: ${{ needs.verify-production.result == 'success' && 'SUCCESS' || 'FAILURE' }}
+      image_tag: ${{ github.sha }}
+      triggered_by: ${{ github.actor }}
+    secrets: inherit

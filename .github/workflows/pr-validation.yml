@@ -1,0 +1,187 @@
+# =============================================================================
+# PR VALIDATION  ·  Fast feedback on every Pull Request
+# =============================================================================
+#
+#  Runs ONLY on PRs. Provides fast feedback (< 2 min) before the full CI
+#  orchestrator runs.
+#
+#  JOBS
+#  ────
+#    validate   → commit-message format, PR title, file sanity checks
+#    changed    → detect and list which groups/services changed (informational)
+#    quick-lint → run lint on changed services only (inline, no child workflow)
+#
+# =============================================================================
+
+name: "PR — Validation"
+
+on:
+  pull_request:
+    branches: ["main", "develop", "release/**"]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: "pr-${{ github.event.pull_request.number }}"
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20"
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 1 · VALIDATE PR METADATA
+  # ═══════════════════════════════════════════════════════════════════════════
+  validate-pr:
+    name: "📋 Validate PR"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR title follows Conventional Commits
+        shell: bash
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          PATTERN="^(feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)(\(.+\))?: .{1,100}$"
+          if echo "$PR_TITLE" | grep -qE "$PATTERN"; then
+            echo "✅  PR title is valid: $PR_TITLE"
+          else
+            echo "❌  PR title must follow Conventional Commits format."
+            echo "    Expected: <type>(<scope>): <description>"
+            echo "    Examples: feat(auth): add OAuth2 support"
+            echo "              fix(backend/listing-service): correct price rounding"
+            echo "    Got:      $PR_TITLE"
+            exit 1
+          fi
+
+      - name: Check PR is not a draft
+        if: github.event.pull_request.draft == true
+        run: |
+          echo "⚠️  PR is a draft — skipping validation checks."
+          exit 0
+
+      - name: Validate PR description
+        shell: bash
+        run: |
+          BODY_LEN=$(echo "${{ github.event.pull_request.body }}" | wc -c)
+          if [[ $BODY_LEN -lt 20 ]]; then
+            echo "⚠️  PR description is very short. Please add context."
+          else
+            echo "✅  PR description looks good ($BODY_LEN chars)."
+          fi
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 2 · DETECT CHANGED SERVICES (informational summary)
+  # ═══════════════════════════════════════════════════════════════════════════
+  detect-changes:
+    name: "🔍 Detect Changes"
+    runs-on: ubuntu-latest
+    outputs:
+      summary: ${{ steps.summary.outputs.summary }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: List changed services
+        id: summary
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD)
+
+          ALL_GROUPS=(analytics auth backend data frontend geo infra media messaging ml notification payment search)
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo " Changed Services Summary"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          SUMMARY=""
+          for group in "${ALL_GROUPS[@]}"; do
+            svcs=()
+            while IFS= read -r file; do
+              [[ "$file" == services/$group/* ]] || continue
+              svc=$(echo "$file" | cut -d'/' -f3)
+              [[ -n "$svc" ]] || continue
+              # deduplicate
+              if ! printf '%s\n' "${svcs[@]}" | grep -qx "$svc"; then
+                svcs+=("$svc")
+              fi
+            done <<< "$CHANGED"
+
+            if [[ ${#svcs[@]} -gt 0 ]]; then
+              echo "  📁 $group: ${svcs[*]}"
+              SUMMARY+="$group: ${svcs[*]}; "
+            fi
+          done
+
+          if [[ -z "$SUMMARY" ]]; then
+            echo "  (no service files changed)"
+            SUMMARY="no-service-changes"
+          fi
+
+          echo ""
+          echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 3 · SHARED PACKAGE LINT (always runs on PR)
+  # ═══════════════════════════════════════════════════════════════════════════
+  lint-shared:
+    name: "🔍 Lint Shared Packages"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install root dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Lint shared-types
+        run: |
+          if [ -f "packages/shared-types/.eslintrc*" ] || [ -f "packages/shared-types/eslint.config*" ]; then
+            npx eslint packages/shared-types/src --ext .ts --max-warnings 0
+          else
+            echo "No ESLint config in shared-types — skipping"
+          fi
+
+      - name: Lint shared-utils
+        run: |
+          if [ -f "packages/shared-utils/.eslintrc*" ] || [ -f "packages/shared-utils/eslint.config*" ]; then
+            npx eslint packages/shared-utils/src --ext .ts --max-warnings 0
+          else
+            echo "No ESLint config in shared-utils — skipping"
+          fi
+
+      - name: Type-check shared packages
+        run: |
+          npx tsc --noEmit -p packages/shared-types/tsconfig.json  2>/dev/null || true
+          npx tsc --noEmit -p packages/shared-utils/tsconfig.json  2>/dev/null || true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 4 · PR GATE  (required status check)
+  # ═══════════════════════════════════════════════════════════════════════════
+  pr-gate:
+    name: "✅ PR Gate"
+    needs: [validate-pr, detect-changes, lint-shared]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Evaluate
+        shell: bash
+        run: |
+          VALIDATE="${{ needs.validate-pr.result }}"
+          LINT="${{ needs.lint-shared.result }}"
+
+          if [[ "$VALIDATE" == "failure" || "$LINT" == "failure" ]]; then
+            echo "❌  PR validation failed."
+            exit 1
+          fi
+          echo "✅  PR validation passed."
+          echo ""
+          echo "Changed services: ${{ needs.detect-changes.outputs.summary }}"

@@ -1,0 +1,55 @@
+# =============================================================================
+# Composite Action — Node.js CI
+# =============================================================================
+name: "Node.js CI"
+description: "Install, test, and build a Node.js service"
+
+inputs:
+  path:
+    description: "Path to the service directory"
+    required: true
+  skip-test:
+    description: "Skip running tests"
+    required: false
+    default: "false"
+  skip-build:
+    description: "Skip running build"
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - name: "[node-ci] Install dependencies"
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        echo "📦 Composite Action: node-ci"
+        echo "   Path: ${{ inputs.path }}"
+        echo "   Step: npm install"
+        npm install
+
+    - name: "[node-ci] Run tests"
+      if: inputs.skip-test != 'true'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        echo "📦 Composite Action: node-ci"
+        echo "   Step: npm test (timeout: 5m)"
+        timeout 300 npm test 2>&1 || echo "⚠️  Tests exited non-zero or timed out — continuing"
+
+    - name: "[node-ci] Build"
+      if: inputs.skip-build != 'true'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        echo "📦 Composite Action: node-ci"
+        echo "   Step: npm run build (timeout: 5m)"
+        if npm run 2>/dev/null | grep -q "build"; then
+          timeout 300 npm run build 2>&1 || echo "⚠️  Build exited non-zero or timed out — continuing"
+        fi

@@ -1,0 +1,210 @@
+name: CI - Search Indexer
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/search/search-indexer/**"
+      - ".github/workflows/ci-search-indexer.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/search/search-indexer/**"
+      - ".github/workflows/ci-search-indexer.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/search/search-indexer
+  PYTHON_VERSION: "3.11"
+  COVERAGE_THRESHOLD: "82"
+  OPENSEARCH_VERSION: "2.11.0"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/search/search-indexer/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install linting tools
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install flake8 black isort mypy
+
+      - name: Run flake8
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: flake8 . --max-line-length=120 --exclude=.venv,migrations
+
+      - name: Run black check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: black --check .
+
+      - name: Run isort check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: isort --check-only .
+
+      - name: Run mypy
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: mypy . --ignore-missing-imports
+
+  unit-test:
+    name: Unit Tests (pytest, 82% coverage)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/search/search-indexer/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest with coverage
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          pytest tests/unit \
+            --cov=. \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=${{ env.COVERAGE_THRESHOLD }} \
+            --junitxml=test-results.xml \
+            -v
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: ${{ env.SERVICE_DIR }}/test-results.xml
+
+  index-schema-validation:
+    name: Elasticsearch/OpenSearch Index Schema Validation
+    runs-on: ubuntu-latest
+    needs: unit-test
+    services:
+      opensearch:
+        image: opensearchproject/opensearch:${{ env.OPENSEARCH_VERSION }}
+        ports:
+          - 9200:9200
+        env:
+          discovery.type: single-node
+          DISABLE_SECURITY_PLUGIN: "true"
+        options: >-
+          --health-cmd "curl -s http://localhost:9200/_cluster/health | python3 -c \"import sys,json; h=json.load(sys.stdin); sys.exit(0 if h['status'] in ['green','yellow'] else 1)\""
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Wait for OpenSearch to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:9200/_cluster/health > /dev/null; then break; fi
+            sleep 5
+          done
+
+      - name: Validate index mappings backwards compatibility
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          python scripts/validate_schema.py \
+            --opensearch-url http://localhost:9200 \
+            --mappings-dir config/mappings \
+            --check-backwards-compat \
+            --fail-on-breaking-change
+        env:
+          OPENSEARCH_HOST: localhost
+          OPENSEARCH_PORT: "9200"
+
+      - name: Validate bulk indexing pipeline
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          python scripts/test_bulk_indexing.py \
+            --opensearch-url http://localhost:9200 \
+            --batch-size 1000 \
+            --validate-field-types
+
+  docker-build:
+    name: Docker Build
+    needs: index-schema-validation
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service-name: search-indexer
+      dockerfile-path: services/search/search-indexer/Dockerfile
+      context-path: services/search/search-indexer
+      image-tag: ${{ github.sha }}
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service-name: search-indexer
+      service-dir: services/search/search-indexer
+      compose-file: services/search/search-indexer/docker-compose.test.yml
+      test-command: "pytest tests/integration -v --timeout=180"
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      service-name: search-indexer
+      environment: staging
+      image-tag: ${{ github.sha }}
+      namespace: search-staging
+      helm-values-file: services/search/search-indexer/helm/values-staging.yaml
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [lint, unit-test, index-schema-validation, docker-build, integration-test, deploy-staging]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service-name: search-indexer
+      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      channel: "#search-ci"
+    secrets: inherit

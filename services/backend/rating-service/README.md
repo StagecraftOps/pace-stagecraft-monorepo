@@ -1,0 +1,4 @@
+﻿# rating-service
+
+Rating aggregation
+

@@ -1,0 +1,150 @@
+name: "CI — property-detail-page"
+
+on:
+  push:
+    paths:
+      - "services/frontend/property-detail-page/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/frontend/property-detail-page/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-pdp-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-pdp-${{ hashFiles('services/frontend/property-detail-page/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-pdp-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/property-detail-page
+      - name: Lint (ESLint)
+        run: npm run lint
+        working-directory: services/frontend/property-detail-page
+      - name: Format check (Prettier)
+        run: npm run format:check
+        working-directory: services/frontend/property-detail-page
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-pdp-${{ hashFiles('services/frontend/property-detail-page/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-pdp-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/property-detail-page
+      - name: TypeScript type check
+        run: npm run type-check
+        working-directory: services/frontend/property-detail-page
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: [lint, type-check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-pdp-${{ hashFiles('services/frontend/property-detail-page/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-pdp-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/property-detail-page
+      - name: Run unit tests with coverage
+        run: npm test -- --ci --coverage --coverageThreshold='{"global":{"lines":80}}'
+        working-directory: services/frontend/property-detail-page
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdp-coverage
+          path: services/frontend/property-detail-page/coverage/
+
+  seo-test:
+    runs-on: ubuntu-latest
+    needs: [unit-test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-pdp-${{ hashFiles('services/frontend/property-detail-page/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-pdp-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/property-detail-page
+      - name: Build
+        run: npm run build
+        working-directory: services/frontend/property-detail-page
+      - name: Validate JSON-LD structured data (schema.org/RealEstateListing)
+        run: node scripts/validate-structured-data.js dist/
+        working-directory: services/frontend/property-detail-page
+      - name: Validate meta tags (og:title, og:image, canonical, robots)
+        run: node scripts/check-meta-tags.js dist/
+        working-directory: services/frontend/property-detail-page
+      - name: Validate sitemap references
+        run: node scripts/validate-sitemap-refs.js
+        working-directory: services/frontend/property-detail-page
+
+  build:
+    needs: [unit-test, seo-test]
+    uses: ./.github/workflows/_template-node-ci.yml
+    with:
+      service_name: property-detail-page
+      node_version: "20"
+      working_directory: services/frontend/property-detail-page
+      run_e2e: false
+    secrets: inherit
+
+  e2e-test:
+    needs: [build]
+    uses: ./.github/workflows/_template-e2e-test.yml
+    with:
+      service_name: property-detail-page
+      base_url: https://staging-pdp.internal
+      browser_list: chromium,firefox
+      test_grep_pattern: "zestimate|photos|contact|school|map"
+    secrets: inherit
+
+  deploy-staging:
+    needs: [e2e-test]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: property-detail-page
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: frontend
+      helm_chart_path: charts/property-detail-page
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

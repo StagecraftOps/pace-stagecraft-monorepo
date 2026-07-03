@@ -1,0 +1,129 @@
+name: "CI — ops-console"
+
+on:
+  push:
+    paths:
+      - "services/frontend/ops-console/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/frontend/ops-console/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-ops-console-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-ops-console-${{ hashFiles('services/frontend/ops-console/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-ops-console-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/ops-console
+      - name: Lint (ESLint)
+        run: npm run lint
+        working-directory: services/frontend/ops-console
+      - name: Format check (Prettier)
+        run: npm run format:check
+        working-directory: services/frontend/ops-console
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-ops-console-${{ hashFiles('services/frontend/ops-console/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-ops-console-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/ops-console
+      - name: TypeScript type check
+        run: npm run type-check
+        working-directory: services/frontend/ops-console
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: [lint, type-check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-ops-console-${{ hashFiles('services/frontend/ops-console/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-ops-console-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/ops-console
+      - name: Run unit tests with coverage
+        run: npm test -- --ci --coverage --coverageThreshold='{"global":{"lines":82}}'
+        working-directory: services/frontend/ops-console
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ops-console-coverage
+          path: services/frontend/ops-console/coverage/
+
+  security-scan:
+    needs: [lint]
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: ops-console
+      working_directory: services/frontend/ops-console
+      severity_threshold: HIGH
+    secrets: inherit
+
+  integration-test:
+    needs: [unit-test, security-scan]
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: ops-console
+      test_suite: ops-console
+      environment_url: https://staging-ops.internal
+      test_timeout_minutes: 20
+    secrets: inherit
+
+  build:
+    needs: [integration-test]
+    uses: ./.github/workflows/_template-node-ci.yml
+    with:
+      service_name: ops-console
+      node_version: "20"
+      working_directory: services/frontend/ops-console
+      run_e2e: false
+    secrets: inherit
+
+  deploy-staging:
+    needs: [build]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: ops-console
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: frontend
+      helm_chart_path: charts/ops-console
+      replicas: 1
+      wait_for_rollout: true
+    secrets: inherit

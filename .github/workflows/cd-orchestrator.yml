@@ -1,0 +1,207 @@
+# =============================================================================
+# CD ORCHESTRATOR  ·  Continuous Deployment Parent Pipeline
+# =============================================================================
+#
+#  Triggered manually (workflow_dispatch) or automatically after a successful
+#  CI run on main / develop.
+#
+#  PARENT → CHILD pattern (same as CI):
+#    This workflow builds a dynamic matrix of groups to deploy and fans each
+#    out to the reusable cd-service-group.yml child workflow.
+#
+#  ENVIRONMENTS
+#  ────────────
+#    main     →  production   (requires manual approval gate)
+#    develop  →  staging      (auto-deploy)
+#    other    →  preview      (auto-deploy)
+#
+# =============================================================================
+
+name: "CD — Orchestrator (Parent)"
+
+on:
+  # Automatically triggered when CI passes on main or develop
+  workflow_run:
+    workflows: ["CI — Orchestrator (Parent)"]
+    types: [completed]
+    branches: ["main", "develop"]
+
+  # Manual deploy — choose environment and optionally a single group
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "staging"
+        type: choice
+        options: ["staging", "production", "preview"]
+      target_group:
+        description: "Deploy ONE group only (leave blank for all)"
+        required: false
+        default: ""
+        type: string
+      sha:
+        description: "Image SHA to deploy (defaults to HEAD)"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: "cd-${{ github.ref }}-${{ github.event.inputs.environment || 'auto' }}"
+  cancel-in-progress: false       # never cancel an in-progress deploy
+
+env:
+  NODE_VERSION: "20"
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 1 · GUARD  — only proceed if CI succeeded
+  # ═══════════════════════════════════════════════════════════════════════════
+  guard:
+    name: "🛡️ Deployment Guard"
+    runs-on: ubuntu-latest
+    outputs:
+      should_deploy: ${{ steps.check.outputs.should_deploy }}
+      environment:   ${{ steps.check.outputs.environment }}
+      deploy_sha:    ${{ steps.check.outputs.deploy_sha }}
+    steps:
+      - name: Evaluate trigger
+        id: check
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            # Only proceed if the upstream CI workflow succeeded
+            if [[ "${{ github.event.workflow_run.conclusion }}" != "success" ]]; then
+              echo "⚠️  CI did not succeed — skipping deployment."
+              echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # Derive environment from the branch that triggered CI
+            BRANCH="${{ github.event.workflow_run.head_branch }}"
+            if [[ "$BRANCH" == "main" ]];    then ENV="production";
+            elif [[ "$BRANCH" == "develop" ]]; then ENV="staging";
+            else ENV="preview"; fi
+            SHA="${{ github.event.workflow_run.head_sha }}"
+          else
+            # Manual dispatch
+            ENV="${{ github.event.inputs.environment || 'staging' }}"
+            SHA="${{ github.event.inputs.sha || github.sha }}"
+          fi
+
+          echo "should_deploy=true"  >> "$GITHUB_OUTPUT"
+          echo "environment=$ENV"    >> "$GITHUB_OUTPUT"
+          echo "deploy_sha=$SHA"     >> "$GITHUB_OUTPUT"
+          echo "✅  Will deploy SHA=$SHA to $ENV"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 2 · BUILD DEPLOY MATRIX  — same inline logic as CI orchestrator
+  # ═══════════════════════════════════════════════════════════════════════════
+  build-matrix:
+    name: "📋 Build Deploy Matrix"
+    needs: guard
+    if: needs.guard.outputs.should_deploy == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix:      ${{ steps.matrix.outputs.matrix }}
+      has_groups:  ${{ steps.matrix.outputs.has_groups }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build matrix
+        id: matrix
+        shell: bash
+        env:
+          TARGET_GROUP: ${{ github.event.inputs.target_group || '' }}
+        run: |
+          ALL_GROUPS=(analytics auth backend data frontend geo infra media messaging ml notification payment search)
+
+          INCLUDES="[]"
+          for group in "${ALL_GROUPS[@]}"; do
+            # Skip if a specific group was requested and this isn't it
+            [[ -n "$TARGET_GROUP" && "$group" != "$TARGET_GROUP" ]] && continue
+
+            [[ ! -d "services/$group" ]] && continue
+
+            svcs=()
+            while IFS= read -r svc_path; do
+              svcs+=("\"$(basename "$svc_path")\"")
+            done < <(find "services/$group" -mindepth 1 -maxdepth 1 -type d | sort)
+
+            [[ ${#svcs[@]} -eq 0 ]] && continue
+
+            SVC_JSON="[$(IFS=,; echo "${svcs[*]}")]"
+            ENTRY="{\"group\":\"$group\",\"services\":$(echo "$SVC_JSON" | jq -c .)}"
+            INCLUDES=$(echo "$INCLUDES" | jq -c --argjson e "$ENTRY" '. + [$e]')
+          done
+
+          MATRIX="{\"include\":$INCLUDES}"
+          echo "matrix=$MATRIX"  >> "$GITHUB_OUTPUT"
+
+          COUNT=$(echo "$INCLUDES" | jq 'length')
+          echo "has_groups=$( [[ $COUNT -gt 0 ]] && echo true || echo false )" >> "$GITHUB_OUTPUT"
+          echo "$MATRIX" | jq .
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 3 · PRODUCTION APPROVAL GATE
+  # ═══════════════════════════════════════════════════════════════════════════
+  #  Configure "production" as a GitHub Environment with required reviewers
+  #  so that this job pauses and waits for human approval before deploying.
+  approval:
+    name: "🔐 Await Production Approval"
+    needs: [guard, build-matrix]
+    if: |
+      needs.guard.outputs.should_deploy == 'true' &&
+      needs.guard.outputs.environment == 'production' &&
+      needs.build-matrix.outputs.has_groups == 'true'
+    runs-on: ubuntu-latest
+    environment: production       # ← GitHub environment with protection rules
+    steps:
+      - name: Approved
+        run: echo "✅  Production deployment approved."
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 4 · PARENT MATRIX DEPLOY  — one child workflow per service group
+  # ═══════════════════════════════════════════════════════════════════════════
+  deploy-groups:
+    name: "🚀 Deploy · ${{ matrix.group }}"
+    needs: [guard, build-matrix, approval]
+    # Run if approval was skipped (staging/preview) or succeeded (production)
+    if: |
+      always() &&
+      needs.guard.outputs.should_deploy == 'true' &&
+      needs.build-matrix.outputs.has_groups == 'true' &&
+      (needs.approval.result == 'success' || needs.approval.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.build-matrix.outputs.matrix) }}
+
+    uses: ./.github/workflows/cd-service-group.yml
+    with:
+      group:       ${{ matrix.group }}
+      services:    ${{ toJson(matrix.services) }}
+      environment: ${{ needs.guard.outputs.environment }}
+      sha:         ${{ needs.guard.outputs.deploy_sha }}
+    secrets: inherit
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JOB 5 · CD GATE
+  # ═══════════════════════════════════════════════════════════════════════════
+  cd-gate:
+    name: "✅ CD Gate"
+    needs: deploy-groups
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Evaluate results
+        shell: bash
+        run: |
+          STATUS="${{ needs.deploy-groups.result }}"
+          if [[ "$STATUS" == "failure" || "$STATUS" == "cancelled" ]]; then
+            echo "❌  One or more groups failed deployment."
+            exit 1
+          fi
+          echo "✅  All groups deployed successfully."

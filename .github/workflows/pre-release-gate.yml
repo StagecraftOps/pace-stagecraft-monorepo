@@ -1,0 +1,206 @@
+name: "Pre-Release Gate"
+
+# ============================================================================
+# PRE-RELEASE GATE
+# Fires after any of the core service CIs complete on the develop branch.
+# Aggregates results and blocks release-production from running if any
+# critical service CI failed. Creates workflow_run → TRIGGERS edges in the
+# Stagecraft knowledge graph, linking individual service CIs to this gate.
+# ============================================================================
+
+on:
+  workflow_run:
+    workflows:
+      - "CI — auth-service"
+      - "CI — listing-service"
+      - "CI — search-api"
+      - "CI — payment-service"
+      - "CI — user-service"
+      - "CI — mortgage-service"
+      - "CI — offer-service"
+      - "CI — transaction-service"
+      - "CI — api-gateway"
+      - "CI — event-bus-service"
+    types:
+      - completed
+    branches:
+      - develop
+
+concurrency:
+  group: "pre-release-gate-${{ github.ref }}"
+  cancel-in-progress: false
+
+jobs:
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # JOB 1: Check conclusion of the triggering workflow
+  # ──────────────────────────────────────────────────────────────────────────
+  check-trigger:
+    name: "Evaluate Triggering CI — ${{ github.event.workflow_run.name }}"
+    runs-on: ubuntu-latest
+    outputs:
+      gate_pass: ${{ steps.evaluate.outputs.gate_pass }}
+      failed_workflow: ${{ steps.evaluate.outputs.failed_workflow }}
+    steps:
+      - name: Evaluate workflow_run conclusion
+        id: evaluate
+        run: |
+          CONCLUSION="${{ github.event.workflow_run.conclusion }}"
+          WORKFLOW="${{ github.event.workflow_run.name }}"
+          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          echo "Triggering workflow : $WORKFLOW"
+          echo "Conclusion          : $CONCLUSION"
+          echo "Head SHA            : $HEAD_SHA"
+
+          if [[ "$CONCLUSION" == "success" ]]; then
+            echo "gate_pass=true"   >> "$GITHUB_OUTPUT"
+            echo "failed_workflow=" >> "$GITHUB_OUTPUT"
+            echo "✅ $WORKFLOW passed — gate open"
+          else
+            echo "gate_pass=false"               >> "$GITHUB_OUTPUT"
+            echo "failed_workflow=$WORKFLOW"      >> "$GITHUB_OUTPUT"
+            echo "❌ $WORKFLOW did NOT pass (conclusion=$CONCLUSION) — gate closed"
+          fi
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # JOB 2: Query GitHub API for ALL core CI statuses on this SHA
+  # ──────────────────────────────────────────────────────────────────────────
+  aggregate-ci-status:
+    name: "Aggregate Core CI Status"
+    runs-on: ubuntu-latest
+    needs: check-trigger
+    outputs:
+      all_pass: ${{ steps.aggregate.outputs.all_pass }}
+      summary_json: ${{ steps.aggregate.outputs.summary_json }}
+    steps:
+      - name: Query workflow run statuses via GitHub API
+        id: aggregate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          CRITICAL_WORKFLOWS=(
+            "CI — auth-service"
+            "CI — listing-service"
+            "CI — search-api"
+            "CI — payment-service"
+            "CI — user-service"
+          )
+
+          ALL_PASS=true
+          SUMMARY="["
+
+          for WF in "${CRITICAL_WORKFLOWS[@]}"; do
+            # URL-encode the workflow name
+            WF_ENC=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$WF'))")
+            RESULT=$(gh api \
+              "repos/$REPO/actions/workflows/$WF_ENC/runs?head_sha=$SHA&per_page=1" \
+              --jq '.workflow_runs[0] | {name: .name, conclusion: .conclusion, status: .status, url: .html_url}' \
+              2>/dev/null || echo '{"name":"'"$WF"'","conclusion":"not_found","status":"unknown","url":""}')
+
+            CONCLUSION=$(echo "$RESULT" | jq -r '.conclusion // "not_found"')
+            echo "  $WF → $CONCLUSION"
+
+            if [[ "$CONCLUSION" != "success" ]]; then
+              ALL_PASS=false
+            fi
+
+            SUMMARY+="$RESULT,"
+          done
+
+          SUMMARY="${SUMMARY%,}]"
+          echo "all_pass=$ALL_PASS"       >> "$GITHUB_OUTPUT"
+          echo "summary_json=$SUMMARY"    >> "$GITHUB_OUTPUT"
+
+          if [[ "$ALL_PASS" == "true" ]]; then
+            echo "✅ All critical service CIs passed on SHA $SHA"
+          else
+            echo "❌ One or more critical service CIs did NOT pass on SHA $SHA"
+          fi
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # JOB 3: Security posture check (only runs when all CIs pass)
+  # ──────────────────────────────────────────────────────────────────────────
+  security-posture:
+    name: "Security Posture Check"
+    runs-on: ubuntu-latest
+    needs: aggregate-ci-status
+    if: needs.aggregate-ci-status.outputs.all_pass == 'true'
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: "pre-release-gate"
+      working_directory: "."
+      severity_threshold: "CRITICAL"
+    secrets: inherit
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # JOB 4: Integration smoke test across service boundaries
+  # ──────────────────────────────────────────────────────────────────────────
+  cross-service-smoke:
+    name: "Cross-Service Smoke Tests"
+    runs-on: ubuntu-latest
+    needs: aggregate-ci-status
+    if: needs.aggregate-ci-status.outputs.all_pass == 'true'
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: "cross-service-smoke"
+      test_suite: "integration"
+      environment_url: "https://staging.zillow.com"
+      test_timeout_minutes: 20
+    secrets: inherit
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # JOB 5: Write gate status to GitHub commit status API
+  # ──────────────────────────────────────────────────────────────────────────
+  write-commit-status:
+    name: "Write Gate Result to Commit Status"
+    runs-on: ubuntu-latest
+    needs: [aggregate-ci-status, security-posture, cross-service-smoke]
+    if: always()
+    steps:
+      - name: Post commit status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          AGGS="${{ needs.aggregate-ci-status.outputs.all_pass }}"
+          SEC="${{ needs.security-posture.result }}"
+          SMOKE="${{ needs.cross-service-smoke.result }}"
+
+          if [[ "$AGGS" == "true" && "$SEC" == "success" && "$SMOKE" == "success" ]]; then
+            STATE="success"
+            DESCRIPTION="All critical CIs passed, security clean, smoke tests green"
+          elif [[ "$AGGS" == "true" && ("$SEC" == "skipped" || "$SMOKE" == "skipped") ]]; then
+            STATE="pending"
+            DESCRIPTION="Some gate jobs were skipped — manual review required"
+          else
+            STATE="failure"
+            DESCRIPTION="Pre-release gate FAILED — check aggregate CI and security status"
+          fi
+
+          gh api \
+            "repos/$REPO/statuses/$SHA" \
+            -f state="$STATE" \
+            -f description="$DESCRIPTION" \
+            -f context="pre-release-gate" \
+            -f target_url="https://github.com/$REPO/actions/runs/${{ github.run_id }}"
+
+          echo "Gate result: $STATE — $DESCRIPTION"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # JOB 6: Notify on failure
+  # ──────────────────────────────────────────────────────────────────────────
+  notify:
+    name: "Notify — Gate Result"
+    needs: [write-commit-status, security-posture, cross-service-smoke]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service_name: "Pre-Release Gate"
+      environment: staging
+      status: ${{ (needs.security-posture.result == 'success' && needs.cross-service-smoke.result == 'success') && 'SUCCESS' || 'FAILURE' }}
+      image_tag: ${{ github.event.workflow_run.head_sha }}
+      triggered_by: ${{ github.event.workflow_run.name }}
+    secrets: inherit

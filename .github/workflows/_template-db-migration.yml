@@ -1,0 +1,156 @@
+name: "Template: Database Migration Runner"
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      migration_tool:
+        required: false
+        type: string
+        default: "alembic"
+      database_url_secret_name:
+        required: true
+        type: string
+      dry_run:
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      AWS_REGION:
+        required: false
+
+jobs:
+  db-migration:
+    name: "DB Migration — ${{ inputs.service_name }} (${{ inputs.environment }})"
+    runs-on: ubuntu-latest
+    if: ${{ secrets.AWS_ACCESS_KEY_ID != '' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Retrieve database URL from Secrets Manager
+        id: get-db-url
+        run: |
+          DB_URL=$(aws secretsmanager get-secret-value \
+            --secret-id "${{ inputs.database_url_secret_name }}" \
+            --query SecretString \
+            --output text)
+          echo "::add-mask::$DB_URL"
+          echo "database_url=$DB_URL" >> $GITHUB_OUTPUT
+
+      - name: Run migration dry-run
+        run: |
+          case "${{ inputs.migration_tool }}" in
+            alembic)
+              cd services/${{ inputs.service_name }}
+              pip install alembic psycopg2-binary
+              alembic --raiseerr upgrade head --sql > migration-dry-run.sql
+              echo "=== Dry-run SQL preview ===" && cat migration-dry-run.sql
+              ;;
+            flyway)
+              docker run --rm \
+                -e FLYWAY_URL="${{ steps.get-db-url.outputs.database_url }}" \
+                flyway/flyway:10 \
+                -locations="filesystem:/github/workspace/services/${{ inputs.service_name }}/migrations" \
+                migrate -dryRunOutput=/dev/stdout
+              ;;
+            goose)
+              cd services/${{ inputs.service_name }}
+              go install github.com/pressly/goose/v3/cmd/goose@latest
+              goose -dir ./migrations postgres "${{ steps.get-db-url.outputs.database_url }}" status
+              ;;
+            liquibase)
+              docker run --rm \
+                liquibase/liquibase:4.27 \
+                --url="${{ steps.get-db-url.outputs.database_url }}" \
+                --changeLogFile=services/${{ inputs.service_name }}/changelog.xml \
+                updateSQL
+              ;;
+          esac
+        env:
+          DATABASE_URL: ${{ steps.get-db-url.outputs.database_url }}
+
+      - name: Run actual migration
+        if: inputs.dry_run == false
+        run: |
+          case "${{ inputs.migration_tool }}" in
+            alembic)
+              cd services/${{ inputs.service_name }}
+              alembic upgrade head
+              ;;
+            flyway)
+              docker run --rm \
+                -e FLYWAY_URL="${{ steps.get-db-url.outputs.database_url }}" \
+                flyway/flyway:10 \
+                -locations="filesystem:/github/workspace/services/${{ inputs.service_name }}/migrations" \
+                migrate
+              ;;
+            goose)
+              cd services/${{ inputs.service_name }}
+              goose -dir ./migrations postgres "${{ steps.get-db-url.outputs.database_url }}" up
+              ;;
+            liquibase)
+              docker run --rm \
+                liquibase/liquibase:4.27 \
+                --url="${{ steps.get-db-url.outputs.database_url }}" \
+                --changeLogFile=services/${{ inputs.service_name }}/changelog.xml \
+                update
+              ;;
+          esac
+        env:
+          DATABASE_URL: ${{ steps.get-db-url.outputs.database_url }}
+
+      - name: Verify migration status
+        run: |
+          case "${{ inputs.migration_tool }}" in
+            alembic)
+              cd services/${{ inputs.service_name }}
+              alembic current
+              alembic history --verbose | head -20
+              ;;
+            flyway)
+              docker run --rm \
+                -e FLYWAY_URL="${{ steps.get-db-url.outputs.database_url }}" \
+                flyway/flyway:10 info
+              ;;
+            goose)
+              cd services/${{ inputs.service_name }}
+              goose -dir ./migrations postgres "${{ steps.get-db-url.outputs.database_url }}" status
+              ;;
+            liquibase)
+              docker run --rm \
+                liquibase/liquibase:4.27 \
+                --url="${{ steps.get-db-url.outputs.database_url }}" \
+                --changeLogFile=services/${{ inputs.service_name }}/changelog.xml \
+                status
+              ;;
+          esac
+        env:
+          DATABASE_URL: ${{ steps.get-db-url.outputs.database_url }}
+
+      - name: Post migration report
+        if: always()
+        run: |
+          echo "## Database Migration Report" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service:** ${{ inputs.service_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tool:** ${{ inputs.migration_tool }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dry Run:** ${{ inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timestamp:** $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_STEP_SUMMARY

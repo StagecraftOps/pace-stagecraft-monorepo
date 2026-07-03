@@ -1,0 +1,61 @@
+name: Parent workflow – trigger and wait
+
+on:
+  workflow_dispatch:
+
+jobs:
+  trigger-and-wait:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger Repo B workflow
+        run: |
+          echo "Triggering Repo B workflow..."
+
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.V1_GITHUB_TOKEN }}" \
+            https://api.github.com/repos/UST-PACE/multiservice-mono-repo/dispatches \
+            -d '{
+              "event_type": "run-child",
+              "client_payload": {
+                "source_repo": "repo-a",
+                "run_id": "'"${{ github.run_id }}"'"
+              }
+            }'
+
+      - name: Wait for child workflow to finish
+        run: |
+          echo "Waiting for Repo B workflow to complete..."
+
+          MAX_RETRIES=30
+          SLEEP_SECONDS=20
+
+          for ((i=1;i<=MAX_RETRIES;i++)); do
+            echo "Polling attempt $i/$MAX_RETRIES ..."
+
+            RESPONSE=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.V1_GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/UST-PACE/multiservice-mono-repo/actions/runs?event=repository_dispatch")
+
+            STATUS=$(echo "$RESPONSE" | jq -r '.workflow_runs[0].status')
+            CONCLUSION=$(echo "$RESPONSE" | jq -r '.workflow_runs[0].conclusion')
+
+            echo "Status: $STATUS"
+            echo "Conclusion: $CONCLUSION"
+
+            if [[ "$STATUS" == "completed" ]]; then
+              if [[ "$CONCLUSION" == "success" ]]; then
+                echo "✅ Child workflow succeeded"
+                exit 0
+              else
+                echo "❌ Child workflow failed"
+                exit 1
+              fi
+            fi
+
+            sleep $SLEEP_SECONDS
+          done
+
+          echo "⏰ Timeout waiting for child workflow"
+          exit 1

@@ -1,0 +1,197 @@
+name: CI - Payment Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/payment/payment-service/**"
+      - ".github/workflows/ci-payment-service.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/payment/payment-service/**"
+      - ".github/workflows/ci-payment-service.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/payment/payment-service
+  PYTHON_VERSION: "3.11"
+  COVERAGE_THRESHOLD: "90"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/payment/payment-service/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install linting tools
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install flake8 black isort mypy bandit
+
+      - name: Run flake8
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: flake8 . --max-line-length=120 --exclude=.venv,migrations
+
+      - name: Run black (check)
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: black --check .
+
+      - name: Run isort (check)
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: isort --check-only .
+
+      - name: Run mypy type checking
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: mypy . --ignore-missing-imports
+
+  unit-test:
+    name: Unit Tests (pytest, 90% coverage)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/payment/payment-service/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest with coverage
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          pytest tests/unit \
+            --cov=. \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=${{ env.COVERAGE_THRESHOLD }} \
+            --junitxml=test-results.xml \
+            -v
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: ${{ env.SERVICE_DIR }}/test-results.xml
+
+  pci-compliance-check:
+    name: PCI-DSS Compliance Check
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install compliance tools
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install bandit detect-secrets semgrep
+
+      - name: Run bandit security scan (PCI-DSS)
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: bandit -r . -ll -x .venv,tests --format json -o bandit-report.json
+
+      - name: Validate no card data in log statements
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          python scripts/pci_log_check.py \
+            --source-dir . \
+            --fail-on-pii \
+            --check-patterns "card_number,cvv,pan,expiry"
+
+      - name: Verify encryption-in-transit configuration
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          python scripts/tls_config_check.py \
+            --config config/ \
+            --min-tls-version TLSv1.2 \
+            --verify-cert-pinning
+
+      - name: Validate audit trail completeness
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: python scripts/audit_trail_check.py --config config/audit.yml
+
+      - name: Detect secrets in codebase
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: detect-secrets scan --baseline .secrets.baseline
+
+  docker-build:
+    name: Docker Build
+    needs: pci-compliance-check
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service-name: payment-service
+      dockerfile-path: services/payment/payment-service/Dockerfile
+      context-path: services/payment/payment-service
+      image-tag: ${{ github.sha }}
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service-name: payment-service
+      service-dir: services/payment/payment-service
+      compose-file: services/payment/payment-service/docker-compose.test.yml
+      test-command: "pytest tests/integration -v --timeout=120"
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      service-name: payment-service
+      environment: staging
+      image-tag: ${{ github.sha }}
+      namespace: payments-staging
+      helm-values-file: services/payment/payment-service/helm/values-staging.yaml
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [lint, unit-test, pci-compliance-check, docker-build, integration-test, deploy-staging]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service-name: payment-service
+      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      channel: "#payments-ci"
+    secrets: inherit

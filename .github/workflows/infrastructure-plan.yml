@@ -1,0 +1,234 @@
+name: "Infrastructure: Terraform Plan"
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - "terraform/**"
+      - ".github/workflows/infrastructure-*.yml"
+
+concurrency:
+  group: terraform-plan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  checkout-and-validate:
+    name: "Checkout and Validate Terraform"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.8.3"
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive infra/
+        continue-on-error: false
+
+      - name: Terraform Init (staging)
+        run: |
+          cd infra/staging
+          terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" -backend-config="key=staging/terraform.tfstate"
+
+      - name: Terraform Validate (staging)
+        run: |
+          cd infra/staging
+          terraform validate
+
+      - name: Terraform Init (production)
+        run: |
+          cd infra/production
+          terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" -backend-config="key=production/terraform.tfstate"
+
+      - name: Terraform Validate (production)
+        run: |
+          cd infra/production
+          terraform validate
+
+  plan-staging:
+    name: "Terraform Plan — Staging"
+    needs: checkout-and-validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.8.3"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Terraform Init
+        run: |
+          cd infra/staging
+          terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" -backend-config="key=staging/terraform.tfstate"
+
+      - name: Terraform Plan
+        id: plan-staging
+        run: |
+          cd infra/staging
+          terraform plan -out=staging.tfplan -no-color 2>&1 | tee staging-plan.txt
+
+      - name: Upload staging plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-tfplan-${{ github.sha }}
+          path: |
+            infra/staging/staging.tfplan
+            infra/staging/staging-plan.txt
+          retention-days: 7
+
+  plan-production:
+    name: "Terraform Plan — Production"
+    needs: checkout-and-validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.8.3"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Terraform Init
+        run: |
+          cd infra/production
+          terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" -backend-config="key=production/terraform.tfstate"
+
+      - name: Terraform Plan
+        run: |
+          cd infra/production
+          terraform plan -out=prod.tfplan -no-color 2>&1 | tee prod-plan.txt
+
+      - name: Upload production plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-tfplan-${{ github.sha }}
+          path: |
+            infra/production/prod.tfplan
+            infra/production/prod-plan.txt
+          retention-days: 7
+
+  security-scan-tf:
+    name: "Terraform Security Scan"
+    needs: checkout-and-validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: infra/
+          format: sarif
+          soft_fail: false
+
+      - name: Run Checkov on Terraform
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: infra/
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+          soft_fail: false
+
+      - name: Upload Checkov results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-results.sarif
+
+  cost-estimate:
+    name: "Infrastructure Cost Estimate"
+    needs: [plan-staging, plan-production]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Generate Infracost breakdown (staging)
+        run: |
+          infracost breakdown \
+            --path=infra/staging \
+            --format=json \
+            --out-file=staging-infracost.json
+
+      - name: Generate Infracost breakdown (production)
+        run: |
+          infracost breakdown \
+            --path=infra/production \
+            --format=json \
+            --out-file=prod-infracost.json
+
+      - name: Upload cost estimates
+        uses: actions/upload-artifact@v4
+        with:
+          name: infracost-estimates-${{ github.sha }}
+          path: |
+            staging-infracost.json
+            prod-infracost.json
+          retention-days: 7
+
+  post-pr-comment:
+    name: "Post Plan Summary on PR"
+    needs: [plan-staging, plan-production, security-scan-tf, cost-estimate]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Format and post PR comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const stagingPlan = fs.existsSync(`staging-tfplan-${{ github.sha }}/staging-plan.txt`)
+              ? fs.readFileSync(`staging-tfplan-${{ github.sha }}/staging-plan.txt`, 'utf8').slice(-3000)
+              : 'Plan output unavailable';
+            const prodPlan = fs.existsSync(`prod-tfplan-${{ github.sha }}/prod-plan.txt`)
+              ? fs.readFileSync(`prod-tfplan-${{ github.sha }}/prod-plan.txt`, 'utf8').slice(-3000)
+              : 'Plan output unavailable';
+            const body = `## Terraform Plan Summary\n\n### Staging\n\`\`\`hcl\n${stagingPlan}\n\`\`\`\n\n### Production\n\`\`\`hcl\n${prodPlan}\n\`\`\`\n\n> Generated from commit ${{ github.sha }}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });

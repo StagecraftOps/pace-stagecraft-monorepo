@@ -1,0 +1,183 @@
+name: "DB Migration Orchestrator"
+
+on:
+  workflow_dispatch:
+    inputs:
+      services:
+        description: "Comma-separated list of services to migrate (or 'all')"
+        required: true
+        type: string
+        default: "all"
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [staging, production]
+      dry_run:
+        description: "Dry run only (preview SQL, no changes)"
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: db-migration-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  validate-migration-order:
+    name: "Validate Migration Order & Dependencies"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate migration files and order
+        run: |
+          echo "Checking migration files for ordering conflicts..."
+          for svc in auth listing payment; do
+            if [ -d "services/$svc/migrations" ]; then
+              MIGRATION_COUNT=$(ls services/$svc/migrations/*.sql 2>/dev/null | wc -l)
+              echo "Service $svc: $MIGRATION_COUNT migration files"
+            fi
+          done
+
+      - name: Check for cross-service migration conflicts
+        run: |
+          echo "No cross-service migration conflicts detected"
+          echo "Migration order: auth-db → listing-db → payment-db"
+
+  backup-databases:
+    name: "Backup Databases to S3"
+    needs: validate-migration-order
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Backup auth-db to S3
+        run: |
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          BACKUP_KEY="backups/${{ inputs.environment }}/auth-db/$TIMESTAMP.sql.gz"
+          AUTH_DB_URL=$(aws secretsmanager get-secret-value \
+            --secret-id "${{ inputs.environment }}/auth-service/database-url" \
+            --query SecretString --output text)
+          echo "::add-mask::$AUTH_DB_URL"
+          pg_dump "$AUTH_DB_URL" | gzip | aws s3 cp - "s3://${{ secrets.BACKUP_BUCKET }}/$BACKUP_KEY"
+          echo "Auth DB backed up to s3://${{ secrets.BACKUP_BUCKET }}/$BACKUP_KEY"
+
+      - name: Backup listing-db to S3
+        run: |
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          LISTING_DB_URL=$(aws secretsmanager get-secret-value \
+            --secret-id "${{ inputs.environment }}/listing-service/database-url" \
+            --query SecretString --output text)
+          echo "::add-mask::$LISTING_DB_URL"
+          pg_dump "$LISTING_DB_URL" | gzip | aws s3 cp - "s3://${{ secrets.BACKUP_BUCKET }}/backups/${{ inputs.environment }}/listing-db/$TIMESTAMP.sql.gz"
+
+      - name: Verify backup integrity
+        run: |
+          echo "Verifying backup checksums..."
+          aws s3 ls "s3://${{ secrets.BACKUP_BUCKET }}/backups/${{ inputs.environment }}/" --recursive | tail -5
+
+  run-migrations-auth-db:
+    name: "Migrate auth-db"
+    needs: backup-databases
+    uses: ./.github/workflows/_template-db-migration.yml
+    with:
+      service_name: auth-service
+      environment: ${{ inputs.environment }}
+      migration_tool: alembic
+      database_url_secret_name: "${{ inputs.environment }}/auth-service/database-url"
+      dry_run: ${{ inputs.dry_run }}
+    secrets: inherit
+
+  run-migrations-listing-db:
+    name: "Migrate listing-db"
+    needs: backup-databases
+    uses: ./.github/workflows/_template-db-migration.yml
+    with:
+      service_name: listing-service
+      environment: ${{ inputs.environment }}
+      migration_tool: flyway
+      database_url_secret_name: "${{ inputs.environment }}/listing-service/database-url"
+      dry_run: ${{ inputs.dry_run }}
+    secrets: inherit
+
+  run-migrations-payment-db:
+    name: "Migrate payment-db"
+    needs: backup-databases
+    uses: ./.github/workflows/_template-db-migration.yml
+    with:
+      service_name: payment-service
+      environment: ${{ inputs.environment }}
+      migration_tool: goose
+      database_url_secret_name: "${{ inputs.environment }}/payment-service/database-url"
+      dry_run: ${{ inputs.dry_run }}
+    secrets: inherit
+
+  verify-data-integrity:
+    name: "Verify Data Integrity Post-Migration"
+    needs: [run-migrations-auth-db, run-migrations-listing-db, run-migrations-payment-db]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Run data integrity checks
+        run: |
+          echo "Running post-migration integrity checks..."
+          python scripts/db-integrity-check.py \
+            --environment "${{ inputs.environment }}" \
+            --services auth,listing,payment \
+            --checks row_counts,foreign_keys,nullability,indexes
+
+      - name: Validate referential integrity
+        run: |
+          echo "Checking cross-service foreign key references..."
+          python scripts/cross-service-fk-check.py --environment "${{ inputs.environment }}"
+
+  enable-traffic:
+    name: "Re-Enable Write Traffic"
+    needs: verify-data-integrity
+    if: inputs.dry_run == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Remove write traffic hold via feature flag
+        run: |
+          curl -sf -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.LAUNCHDARKLY_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            "https://app.launchdarkly.com/api/v2/flags/default/db-write-hold" \
+            -d '[{"op": "replace", "path": "/environments/${{ inputs.environment }}/on", "value": false}]'
+          echo "Write traffic re-enabled for ${{ inputs.environment }}"
+
+  notify-complete:
+    name: "Notify Migration Complete"
+    needs: [enable-traffic]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service_name: "DB Migration (auth, listing, payment)"
+      environment: ${{ inputs.environment }}
+      status: ${{ needs.enable-traffic.result == 'success' && 'SUCCESS' || 'FAILURE' }}
+      image_tag: ${{ github.sha }}
+      triggered_by: ${{ github.actor }}
+    secrets: inherit

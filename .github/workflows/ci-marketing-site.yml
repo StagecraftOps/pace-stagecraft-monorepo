@@ -1,0 +1,163 @@
+name: "CI — marketing-site"
+
+on:
+  push:
+    paths:
+      - "services/frontend/marketing-site/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/frontend/marketing-site/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-marketing-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-marketing-${{ hashFiles('services/frontend/marketing-site/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-marketing-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/marketing-site
+      - name: Lint (ESLint)
+        run: npm run lint
+        working-directory: services/frontend/marketing-site
+      - name: Format check (Prettier)
+        run: npm run format:check
+        working-directory: services/frontend/marketing-site
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-marketing-${{ hashFiles('services/frontend/marketing-site/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-marketing-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/marketing-site
+      - name: TypeScript type check
+        run: npm run type-check
+        working-directory: services/frontend/marketing-site
+
+  build:
+    needs: [lint, type-check]
+    uses: ./.github/workflows/_template-node-ci.yml
+    with:
+      service_name: marketing-site
+      node_version: "20"
+      working_directory: services/frontend/marketing-site
+      run_e2e: false
+    secrets: inherit
+
+  seo-audit:
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-marketing-${{ hashFiles('services/frontend/marketing-site/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-marketing-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/marketing-site
+      - name: Build
+        run: npm run build
+        working-directory: services/frontend/marketing-site
+      - name: Run Lighthouse SEO audit (score >= 0.95)
+        run: |
+          npx serve dist -l 3000 &
+          sleep 5
+          lighthouse --output json --chrome-flags="--headless --no-sandbox" \
+            http://localhost:3000/ > lh-seo.json
+          jq '.categories.seo.score' lh-seo.json | awk '{if($1 < 0.95) { print "SEO score " $1 " below threshold 0.95"; exit 1 }}'
+        working-directory: services/frontend/marketing-site
+      - name: Validate sitemap URLs
+        run: node scripts/check-sitemap.js dist/sitemap.xml --validate-all-urls
+        working-directory: services/frontend/marketing-site
+      - name: Validate schema markup
+        run: node scripts/check-schema-markup.js dist/
+        working-directory: services/frontend/marketing-site
+      - name: Upload Lighthouse SEO report
+        uses: actions/upload-artifact@v4
+        with:
+          name: marketing-lh-seo
+          path: services/frontend/marketing-site/lh-seo.json
+
+  link-check:
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-marketing-${{ hashFiles('services/frontend/marketing-site/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-marketing-
+      - name: Install dependencies and broken-link-checker
+        run: |
+          npm ci
+          npm install -g broken-link-checker
+        working-directory: services/frontend/marketing-site
+      - name: Build
+        run: npm run build
+        working-directory: services/frontend/marketing-site
+      - name: Start local server and check for broken internal links
+        run: |
+          npm run start &
+          sleep 10
+          blc http://localhost:3000 --recursive --exclude-external --filter-level 3
+        working-directory: services/frontend/marketing-site
+
+  e2e-test:
+    needs: [build, seo-audit]
+    uses: ./.github/workflows/_template-e2e-test.yml
+    with:
+      service_name: marketing-site
+      base_url: https://staging-marketing.internal
+      browser_list: chromium,firefox
+      test_grep_pattern: "contact|learn more|download|newsletter"
+    secrets: inherit
+
+  deploy-staging:
+    needs: [e2e-test, link-check, seo-audit]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: marketing-site
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: frontend
+      helm_chart_path: charts/marketing-site
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

@@ -1,0 +1,135 @@
+name: "Template: Deploy to Kubernetes via Helm"
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      service_name:
+        required: true
+        type: string
+      image_tag:
+        required: true
+        type: string
+      cluster_name:
+        required: true
+        type: string
+      namespace:
+        required: true
+        type: string
+      helm_chart_path:
+        required: false
+        type: string
+        default: "./charts"
+      replicas:
+        required: false
+        type: number
+        default: 2
+      wait_for_rollout:
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      AWS_REGION:
+        required: false
+      HELM_VALUES_SECRET:
+        required: false
+
+jobs:
+  deploy-k8s:
+    name: "Deploy ${{ inputs.service_name }} → ${{ inputs.environment }}"
+    runs-on: ubuntu-latest
+    if: ${{ secrets.AWS_ACCESS_KEY_ID != '' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Update kubeconfig for EKS cluster
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ inputs.cluster_name }} \
+            --region ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Install Helm and plugins
+        run: |
+          helm version
+          helm plugin install https://github.com/databus23/helm-diff --version 3.9.4 || true
+
+      - name: Helm lint
+        run: |
+          helm lint ${{ inputs.helm_chart_path }}/${{ inputs.service_name }} \
+            --set image.tag=${{ inputs.image_tag }} \
+            --set replicaCount=${{ inputs.replicas }}
+
+      - name: Helm diff (preview changes)
+        run: |
+          helm diff upgrade ${{ inputs.service_name }} ${{ inputs.helm_chart_path }}/${{ inputs.service_name }} \
+            --namespace ${{ inputs.namespace }} \
+            --set image.tag=${{ inputs.image_tag }} \
+            --set replicaCount=${{ inputs.replicas }} \
+            --allow-unreleased \
+            --no-hooks
+        continue-on-error: true
+
+      - name: Helm upgrade / install
+        run: |
+          helm upgrade --install ${{ inputs.service_name }} ${{ inputs.helm_chart_path }}/${{ inputs.service_name }} \
+            --namespace ${{ inputs.namespace }} \
+            --create-namespace \
+            --set image.tag=${{ inputs.image_tag }} \
+            --set replicaCount=${{ inputs.replicas }} \
+            --set environment=${{ inputs.environment }} \
+            --set deployedBy=${{ github.actor }} \
+            --set deployedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            --atomic \
+            --timeout=10m \
+            --history-max=10
+
+      - name: Wait for rollout to complete
+        if: inputs.wait_for_rollout
+        run: |
+          kubectl rollout status deployment/${{ inputs.service_name }} \
+            --namespace=${{ inputs.namespace }} \
+            --timeout=10m
+
+      - name: Run smoke test
+        run: |
+          SERVICE_URL=$(kubectl get service ${{ inputs.service_name }} \
+            --namespace=${{ inputs.namespace }} \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          echo "Service URL: $SERVICE_URL"
+          for i in {1..5}; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://$SERVICE_URL/health" --connect-timeout 10)
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "Smoke test passed (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $HTTP_STATUS — retrying in 10s..."
+            sleep 10
+          done
+          echo "Smoke test failed after 5 attempts"
+          exit 1
+
+      - name: Output deployment summary
+        if: always()
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service:** ${{ inputs.service_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image Tag:** ${{ inputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Namespace:** ${{ inputs.namespace }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Replicas:** ${{ inputs.replicas }}" >> $GITHUB_STEP_SUMMARY
+          kubectl get pods -n ${{ inputs.namespace }} -l app=${{ inputs.service_name }} >> $GITHUB_STEP_SUMMARY || true

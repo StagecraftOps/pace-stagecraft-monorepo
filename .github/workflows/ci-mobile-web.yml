@@ -1,0 +1,160 @@
+name: "CI — mobile-web"
+
+on:
+  push:
+    paths:
+      - "services/frontend/mobile-web/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/frontend/mobile-web/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-mobile-web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-mobile-web-${{ hashFiles('services/frontend/mobile-web/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-mobile-web-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/mobile-web
+      - name: Lint (ESLint)
+        run: npm run lint
+        working-directory: services/frontend/mobile-web
+      - name: Format check (Prettier)
+        run: npm run format:check
+        working-directory: services/frontend/mobile-web
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-mobile-web-${{ hashFiles('services/frontend/mobile-web/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-mobile-web-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/mobile-web
+      - name: TypeScript type check
+        run: npm run type-check
+        working-directory: services/frontend/mobile-web
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: [lint, type-check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-mobile-web-${{ hashFiles('services/frontend/mobile-web/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-mobile-web-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/mobile-web
+      - name: Run unit tests with coverage
+        run: npm test -- --ci --coverage --coverageThreshold='{"global":{"lines":80}}'
+        working-directory: services/frontend/mobile-web
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-web-coverage
+          path: services/frontend/mobile-web/coverage/
+
+  perf-budget:
+    runs-on: ubuntu-latest
+    needs: [unit-test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-mobile-web-${{ hashFiles('services/frontend/mobile-web/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-mobile-web-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/mobile-web
+      - name: Build
+        run: npm run build
+        working-directory: services/frontend/mobile-web
+      - name: Run Lighthouse CI (mobile preset — LCP < 4s, TTI < 5s, perf > 75, a11y > 90)
+        run: npx @lhci/cli@0.14.x autorun
+        working-directory: services/frontend/mobile-web
+        env:
+          LHCI_BUILD_CONTEXT__CURRENT_HASH: ${{ github.sha }}
+      - name: Upload Lighthouse results
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-web-lighthouse
+          path: services/frontend/mobile-web/.lighthouseci/
+
+  security-scan:
+    needs: [lint]
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: mobile-web
+      working_directory: services/frontend/mobile-web
+      severity_threshold: MEDIUM
+    secrets: inherit
+
+  build:
+    needs: [unit-test, perf-budget]
+    uses: ./.github/workflows/_template-node-ci.yml
+    with:
+      service_name: mobile-web
+      node_version: "20"
+      working_directory: services/frontend/mobile-web
+      run_e2e: false
+    secrets: inherit
+
+  e2e-test:
+    needs: [build]
+    uses: ./.github/workflows/_template-e2e-test.yml
+    with:
+      service_name: mobile-web
+      base_url: https://staging-mobile.internal
+      browser_list: chromium
+      test_grep_pattern: "mobile|search|contact"
+    secrets: inherit
+
+  deploy-staging:
+    needs: [e2e-test]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: mobile-web
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: frontend
+      helm_chart_path: charts/mobile-web
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

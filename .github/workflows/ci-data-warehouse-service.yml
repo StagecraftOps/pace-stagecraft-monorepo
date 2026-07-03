@@ -1,0 +1,159 @@
+name: CI - Data Warehouse Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/data/data-warehouse-service/**"
+      - ".github/workflows/ci-data-warehouse-service.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/data/data-warehouse-service/**"
+      - ".github/workflows/ci-data-warehouse-service.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/data/data-warehouse-service
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: data-warehouse-service
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/data-warehouse-service/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install lint tools
+        run: pip install flake8 black isort mypy bandit
+
+      - name: Run flake8
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: flake8 src/ --max-line-length=120 --extend-ignore=E203,W503
+
+      - name: Check black formatting
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: black --check src/
+
+      - name: Check import ordering
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: isort --check-only --diff src/
+
+      - name: Run bandit security scan
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: bandit -r src/ -ll --exclude src/tests/
+
+  unit-test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/data-warehouse-service/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest with 78% coverage threshold
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          ENVIRONMENT: test
+          SNOWFLAKE_ACCOUNT: mock
+          REDSHIFT_HOST: ""
+        run: |
+          pytest tests/unit/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=78 \
+            -v --tb=short
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-warehouse-coverage
+          path: ${{ env.SERVICE_DIR }}/coverage.xml
+
+  migration-dry-run:
+    name: Database Migration Dry Run
+    needs: unit-test
+    uses: ./.github/workflows/_template-db-migration.yml
+    with:
+      service_dir: services/data/data-warehouse-service
+      migration_dir: migrations/
+      dry_run: true
+      target_db: snowflake
+    secrets: inherit
+
+  docker-build:
+    name: Docker Build
+    needs: migration-dry-run
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_dir: services/data/data-warehouse-service
+      image_name: data-warehouse-service
+      dockerfile: services/data/data-warehouse-service/Dockerfile
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_dir: services/data/data-warehouse-service
+      python_version: "3.11"
+      test_path: tests/integration/
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: data-warehouse-service
+      namespace: data-pipeline
+      image_tag: ${{ github.sha }}
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [deploy-staging, integration-test]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      workflow_name: "Data Warehouse Service CI"
+      service_name: data-warehouse-service
+      environment: staging
+    secrets: inherit

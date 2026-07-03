@@ -1,0 +1,164 @@
+name: "CI — training-orchestrator"
+
+on:
+  push:
+    paths:
+      - "services/ml/training-orchestrator/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/ml/training-orchestrator/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-training-orch-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: training-orch-${{ hashFiles('services/ml/training-orchestrator/requirements*.txt') }}
+          restore-keys: training-orch-
+      - name: Install package with dev extras
+        run: pip install -e ".[dev]"
+        working-directory: services/ml/training-orchestrator
+      - name: Lint with ruff
+        run: ruff check . --output-format=github
+        working-directory: services/ml/training-orchestrator
+      - name: Type check with mypy
+        run: mypy src/ --ignore-missing-imports
+        working-directory: services/ml/training-orchestrator
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: [lint-typecheck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: training-orch-${{ hashFiles('services/ml/training-orchestrator/requirements*.txt') }}
+          restore-keys: training-orch-
+      - name: Install package with dev extras
+        run: pip install -e ".[dev]"
+        working-directory: services/ml/training-orchestrator
+      - name: Run unit tests with coverage
+        run: pytest tests/unit/ -v --cov=src --cov-report=xml --cov-fail-under=80
+        working-directory: services/ml/training-orchestrator
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-orch-coverage
+          path: services/ml/training-orchestrator/coverage.xml
+
+  dag-validation:
+    runs-on: ubuntu-latest
+    needs: [lint-typecheck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: training-orch-${{ hashFiles('services/ml/training-orchestrator/requirements*.txt') }}
+          restore-keys: training-orch-
+      - name: Install Airflow and pytest plugin
+        run: pip install -e ".[dev]" apache-airflow pytest-airflow
+        working-directory: services/ml/training-orchestrator
+      - name: Validate all DAG definitions with pytest-airflow
+        run: python -m pytest tests/dags/ -v --airflow
+        working-directory: services/ml/training-orchestrator
+      - name: Dry-run zestimate_training_weekly DAG
+        run: airflow dags test --dag-id zestimate_training_weekly
+        working-directory: services/ml/training-orchestrator
+        env:
+          AIRFLOW__CORE__DAGS_FOLDER: dags/
+          AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      - name: Dry-run search_ranking_retraining DAG
+        run: airflow dags test --dag-id search_ranking_retraining
+        working-directory: services/ml/training-orchestrator
+        env:
+          AIRFLOW__CORE__DAGS_FOLDER: dags/
+          AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      - name: Dry-run fraud_model_daily DAG
+        run: airflow dags test --dag-id fraud_model_daily
+        working-directory: services/ml/training-orchestrator
+        env:
+          AIRFLOW__CORE__DAGS_FOLDER: dags/
+          AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      - name: Upload DAG validation report
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-orch-dag-validation
+          path: services/ml/training-orchestrator/dag-validation-report.txt
+
+  security-scan:
+    needs: [lint-typecheck]
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: training-orchestrator
+      working_directory: services/ml/training-orchestrator
+      severity_threshold: MEDIUM
+    secrets: inherit
+
+  build:
+    needs: [unit-test, dag-validation]
+    uses: ./.github/workflows/_template-python-ci.yml
+    with:
+      service_name: training-orchestrator
+      python_version: "3.11"
+      working_directory: services/ml/training-orchestrator
+      run_integration: false
+    secrets: inherit
+
+  docker-build:
+    needs: [unit-test, dag-validation]
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: training-orchestrator
+      dockerfile_path: services/ml/training-orchestrator/Dockerfile
+      ecr_repository: stagecraft/training-orchestrator
+      image_tag: ${{ github.sha }}
+      push_image: true
+    secrets: inherit
+
+  integration-test:
+    needs: [docker-build]
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: training-orchestrator
+      test_suite: training-orchestrator
+      environment_url: https://staging-airflow.internal
+      test_timeout_minutes: 30
+    secrets: inherit
+
+  deploy-staging:
+    needs: [dag-validation, integration-test]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: training-orchestrator
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: ml
+      helm_chart_path: charts/training-orchestrator
+      replicas: 1
+      wait_for_rollout: true
+    secrets: inherit

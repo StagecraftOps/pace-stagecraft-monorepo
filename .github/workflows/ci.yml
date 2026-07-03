@@ -1,0 +1,647 @@
+# =============================================================================
+# PARENT CI WORKFLOW — Dynamic Monorepo Orchestrator
+# =============================================================================
+# Triggers on push/PR/dispatch, detects affected domains AND services,
+# pre-slices each domain's service list into ≤256-entry chunks, and fans
+# out to a reusable child workflow per chunk.
+#
+# Architecture for full parallelism beyond the 256-matrix limit:
+#
+#   ci.yml (this file)
+#     detect-changes:
+#       1. Identify affected domains (git diff / global / manual dispatch)
+#       2. For each domain, list its services
+#       3. Split each service list into ≤256 chunks
+#       4. Output flat array of {domain, chunk, services} objects
+#
+#     domain-ci (matrix over chunks):
+#       calls domain-ci.yml once per chunk
+#       → child runs pure parallel matrix (1 job = 1 service)
+#
+#   Result for a domain with 800 services:
+#     Parent creates 4 chunks (800 ÷ 256) → 4 child workflow calls
+#     Each child creates a 200-entry matrix → 800 parallel jobs total
+#     No single matrix exceeds 256, every service gets its own job.
+# =============================================================================
+
+name: "CI — Monorepo Orchestrator"
+
+on:
+  push:
+    branches: [main, develop, "EO-72200"]
+  pull_request:
+    branches: [main, develop]
+  # Manual trigger — run CI for a specific domain on-demand
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: "Enter domain (e.g., backend, frontend). Leave empty for normal change detection."
+        required: false
+        type: string
+        default: ""
+
+# Cancel redundant runs for the same PR / branch
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # STAGE 1 — Detect affected domains, list services, split into ≤256 chunks
+  # ---------------------------------------------------------------------------
+  detect-changes:
+    name: "\U0001F50D Detect & Plan"
+    runs-on: [self-hosted, arc-runner]
+    outputs:
+      # JSON array of {domain, chunk, services} objects for the matrix
+      domain_chunks: ${{ steps.plan.outputs.domain_chunks }}
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changes, enumerate services, build chunks
+        id: plan
+        shell: bash
+        run: |
+          # ─────────────────────────────────────────────────────────
+          # Helper: given a domain name, list its services, sort them,
+          # split into ≤256 chunks, and append to DOMAIN_CHUNKS.
+          #
+          # Args:
+          #   $1 = domain name
+          #   $2 = "all" → list every service dir
+          #        "diff" → only services with changed files
+          # ─────────────────────────────────────────────────────────
+          build_chunks() {
+            local domain="$1"
+            local mode="$2"
+            local layer="${3:-0}"
+            local svc_list_json="$4"
+            local SERVICES=()
+
+            if [ -n "$svc_list_json" ]; then
+              # Explicit service list (from orchestrator layering)
+              mapfile -t SERVICES < <(echo "$svc_list_json" | jq -r '.[]')
+            elif [ "$mode" = "all" ]; then
+              for svc_dir in "services/${domain}"/*/; do
+                [ -d "$svc_dir" ] || continue
+                SERVICES+=("$(basename "$svc_dir")")
+              done
+            else
+              # Extract changed services from CHANGED_FILES
+              declare -A _SEEN
+              while IFS= read -r file; do
+                if [[ "$file" =~ ^services/${domain}/([^/]+)/ ]]; then
+                  local svc="${BASH_REMATCH[1]}"
+                  if [ -z "${_SEEN[$svc]+_}" ] && [ -d "services/${domain}/${svc}" ]; then
+                    _SEEN["$svc"]=1
+                    SERVICES+=("$svc")
+                  fi
+                fi
+              done <<< "$CHANGED_FILES"
+            fi
+
+            [ ${#SERVICES[@]} -eq 0 ] && return
+
+            # Sort for determinism
+            local SORTED
+            mapfile -t SORTED < <(printf '%s\n' "${SERVICES[@]}" | sort)
+            local total=${#SORTED[@]}
+
+            echo "  ${domain}: ${total} service(s) [layer ${layer}]"
+
+            # Slice into chunks of ≤256
+            local i cidx svc_json chunk_obj num_chunks=$(( (total + 255) / 256 ))
+            echo "    → Splitting into ${num_chunks} chunk(s) (max 256 per chunk)"
+            for (( i=0; i<total; i+=256 )); do
+              local CHUNK=("${SORTED[@]:$i:256}")
+              cidx=$((i / 256))
+              echo "    ➤ Layer ${layer} → Chunk ${cidx}: ${#CHUNK[@]} service(s)"
+              svc_json=$(printf '%s\n' "${CHUNK[@]}" | jq -R . | jq -sc .)
+              chunk_obj=$(jq -cn \
+                --arg d "$domain" \
+                --argjson c "$cidx" \
+                --argjson l "$layer" \
+                --arg s "$svc_json" \
+                '{domain: $d, chunk: $c, layer: $l, services: $s}')
+
+              [ "$FIRST" = false ] && DOMAIN_CHUNKS+=","
+              FIRST=false
+              DOMAIN_CHUNKS+="$chunk_obj"
+            done
+          }
+
+          # ─── Shared accumulator for all chunks ───
+          DOMAIN_CHUNKS="["
+          FIRST=true
+
+          # -----------------------------------------------------------
+          # 0. Manual dispatch shortcut
+          # -----------------------------------------------------------
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.domain }}" ]; then
+            MANUAL_DOMAIN="${{ github.event.inputs.domain }}"
+            echo "Manual dispatch for domain: $MANUAL_DOMAIN"
+
+            if [ ! -d "services/${MANUAL_DOMAIN}" ]; then
+              echo "::error::Domain 'services/${MANUAL_DOMAIN}' does not exist. Available:"
+              ls -1d services/*/ | xargs -I{} basename {}
+              exit 1
+            fi
+
+            build_chunks "$MANUAL_DOMAIN" "all"
+            DOMAIN_CHUNKS+="]"
+
+            echo "domain_chunks=$DOMAIN_CHUNKS" >> "$GITHUB_OUTPUT"
+            echo "has_changes=true"              >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # -----------------------------------------------------------
+          # 1. Compute the diff range
+          # -----------------------------------------------------------
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE_SHA="${{ github.event.before }}"
+            HEAD_SHA="${{ github.sha }}"
+            if [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+              BASE_SHA=$(git rev-list --max-parents=0 HEAD)
+            fi
+          fi
+
+          echo "Base: $BASE_SHA"
+          echo "Head: $HEAD_SHA"
+
+          CHANGED_FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || echo "")
+          echo "--- Changed files ---"
+          echo "$CHANGED_FILES"
+          echo "---------------------"
+
+          # -----------------------------------------------------------
+          # 2. Discover all domain folders
+          # -----------------------------------------------------------
+          ALL_DOMAINS=()
+          for dir in services/*/; do
+            d=$(basename "$dir")
+            if [ -n "$(find "$dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)" ]; then
+              ALL_DOMAINS+=("$d")
+            fi
+          done
+          echo "Domains discovered: ${ALL_DOMAINS[*]}"
+
+          # -----------------------------------------------------------
+          # 3. Check for global changes (shared packages, root configs)
+          # -----------------------------------------------------------
+          GLOBAL_CHANGE=false
+          while IFS= read -r file; do
+            case "$file" in
+              packages/*|infrastructure/*|.github/*|orchestrator.yaml|tsconfig.base.json|turbo.json|package.json)
+                GLOBAL_CHANGE=true; break ;;
+            esac
+          done <<< "$CHANGED_FILES"
+
+          # -----------------------------------------------------------
+          # 4. Determine affected domains
+          # -----------------------------------------------------------
+          if [ "$GLOBAL_CHANGE" = true ]; then
+            echo "Global change — all domains affected."
+            AFFECTED_DOMAINS=("${ALL_DOMAINS[@]}")
+          else
+            declare -A AFFECTED_MAP
+            while IFS= read -r file; do
+              if [[ "$file" =~ ^services/([^/]+)/ ]]; then
+                AFFECTED_MAP["${BASH_REMATCH[1]}"]=1
+              fi
+            done <<< "$CHANGED_FILES"
+            AFFECTED_DOMAINS=("${!AFFECTED_MAP[@]}")
+          fi
+
+          # -----------------------------------------------------------
+          # 4.5 Orchestrator: dependency-aware layering (optional)
+          #     Reads orchestrator.yaml, builds a dependency graph,
+          #     and uses Kahn's Algorithm to assign execution layers.
+          #     If orchestrator.yaml is missing → all services get layer 0.
+          # -----------------------------------------------------------
+          USE_ORCHESTRATOR=false
+          declare -A LAYER_OF
+          MERMAID_EDGES=""
+          MAX_LAYER=0
+          ALL_ORCH_SVCS=""
+
+          if [ -f "orchestrator.yaml" ]; then
+            echo "📄 orchestrator.yaml found — $(wc -l < orchestrator.yaml) lines"
+
+            # ── Pure bash + jq parser (no python/node needed) ──
+            # The depends_on values in YAML are already valid JSON arrays,
+            # e.g. ["auth/auth-service", "backend/config-service"]
+            # so we can construct JSON directly in bash strings.
+            declare -a _ORCH_SVCS=()
+            declare -A _ORCH_DEPS
+            _CUR=""
+            while IFS= read -r _line || [[ -n "$_line" ]]; do
+              _line="${_line//$'\r'/}"                              # strip \r
+              [[ "$_line" =~ ^[[:space:]]*(#|$) ]] && continue     # skip comments/blank
+
+              # Match service line: "  domain/service-name: {}" or "  domain/service-name:"
+              if [[ "$_line" =~ ^[[:space:]]{1,4}([a-zA-Z][a-zA-Z0-9_-]*/[a-zA-Z][a-zA-Z0-9_-]*): ]]; then
+                _CUR="${BASH_REMATCH[1]}"
+                _ORCH_SVCS+=("$_CUR")
+              # Match depends_on line: "    depends_on: [...]"
+              elif [[ "$_line" =~ depends_on:[[:space:]]*(\[.+\]) ]] && [ -n "$_CUR" ]; then
+                _ORCH_DEPS["$_CUR"]="${BASH_REMATCH[1]}"
+              fi
+            done < orchestrator.yaml
+
+            # Build JSON from collected data (single jq call for validation)
+            _JSON_INNER=""
+            _SEP=""
+            for _svc in "${_ORCH_SVCS[@]}"; do
+              if [ -n "${_ORCH_DEPS[$_svc]+_}" ]; then
+                _JSON_INNER+="${_SEP}\"${_svc}\":{\"depends_on\":${_ORCH_DEPS[$_svc]}}"
+              else
+                _JSON_INNER+="${_SEP}\"${_svc}\":{}"
+              fi
+              _SEP=","
+            done
+            ORCH_JSON=$(printf '%s' "{\"services\":{${_JSON_INNER}}}" | jq -c '.' 2>/dev/null) || ORCH_JSON=""
+
+            ORCH_SVC_COUNT=0
+            if [ -n "$ORCH_JSON" ]; then
+              ORCH_SVC_COUNT=$(printf '%s' "$ORCH_JSON" | jq '.services | length' 2>/dev/null || echo "0")
+            fi
+            echo "   → Parsed ${#_ORCH_SVCS[@]} services, validated $ORCH_SVC_COUNT via jq"
+
+            if [ "$ORCH_SVC_COUNT" -gt 0 ] 2>/dev/null; then
+              echo ""
+              echo "📦 Orchestrator detected — enabling dependency-aware layering"
+              USE_ORCHESTRATOR=true
+
+              ALL_ORCH_SVCS=$(printf '%s' "$ORCH_JSON" | jq -r '.services | keys[]' 2>/dev/null || echo "")
+
+              if [ -n "$ALL_ORCH_SVCS" ]; then
+                declare -A IN_DEGREE
+                declare -A DEPENDENTS
+
+                for svc in $ALL_ORCH_SVCS; do
+                  IN_DEGREE["$svc"]=0
+                done
+
+                # Build in-degree map, reverse adjacency, and mermaid edges
+                for svc in $ALL_ORCH_SVCS; do
+                  deps=$(printf '%s' "$ORCH_JSON" | jq -r --arg s "$svc" '.services[$s].depends_on // [] | .[]')
+                  dep_count=0
+                  for dep in $deps; do
+                    dep_count=$((dep_count + 1))
+                    DEPENDENTS["$dep"]+=" $svc"
+                    dep_id=$(echo "$dep" | tr '/-' '__')
+                    svc_id=$(echo "$svc" | tr '/-' '__')
+                    MERMAID_EDGES+="  ${dep_id} --> ${svc_id}"$'\n'
+                  done
+                  IN_DEGREE["$svc"]=$dep_count
+                done
+
+                # ── Kahn's Algorithm: topological sort into layers ──
+                PROCESSED=0
+                TOTAL_ORCH=$(echo "$ALL_ORCH_SVCS" | wc -w | tr -d ' ')
+                CURRENT_LAYER=0
+
+                while [ "$PROCESSED" -lt "$TOTAL_ORCH" ]; do
+                  LAYER_NODES=()
+                  for svc in "${!IN_DEGREE[@]}"; do
+                    if [ "${IN_DEGREE[$svc]}" -eq 0 ] && [ -z "${LAYER_OF[$svc]+_}" ]; then
+                      LAYER_NODES+=("$svc")
+                      LAYER_OF["$svc"]=$CURRENT_LAYER
+                    fi
+                  done
+
+                  if [ ${#LAYER_NODES[@]} -eq 0 ]; then
+                    echo "⚠️  Circular dependency detected — remaining services → layer $CURRENT_LAYER"
+                    for svc in "${!IN_DEGREE[@]}"; do
+                      if [ -z "${LAYER_OF[$svc]+_}" ]; then
+                        LAYER_OF["$svc"]=$CURRENT_LAYER
+                        PROCESSED=$((PROCESSED + 1))
+                      fi
+                    done
+                    break
+                  fi
+
+                  echo "🔹 Layer ${CURRENT_LAYER}: ${LAYER_NODES[*]}"
+
+                  for svc in "${LAYER_NODES[@]}"; do
+                    PROCESSED=$((PROCESSED + 1))
+                    for dependent in ${DEPENDENTS[$svc]}; do
+                      IN_DEGREE["$dependent"]=$((IN_DEGREE["$dependent"] - 1))
+                    done
+                    IN_DEGREE["$svc"]=-1
+                  done
+
+                  CURRENT_LAYER=$((CURRENT_LAYER + 1))
+                done
+
+                MAX_LAYER=$((CURRENT_LAYER - 1))
+                [ $MAX_LAYER -lt 0 ] && MAX_LAYER=0
+                echo "📊 Total layers: $((MAX_LAYER + 1))"
+              fi
+            else
+              echo "⚠️  orchestrator.yaml found but services could not be extracted — standard mode"
+            fi
+          else
+            echo "ℹ️  No orchestrator.yaml — standard execution (all services at layer 0)"
+          fi
+
+          # -----------------------------------------------------------
+          # 5. For each affected domain → list services → chunk → output
+          #    Global change or manual dispatch: list ALL services
+          #    Normal diff: list only changed services
+          #    If orchestrator: group by (layer, domain) before chunking
+          # -----------------------------------------------------------
+          SVC_MODE="diff"
+          [ "$GLOBAL_CHANGE" = true ] && SVC_MODE="all"
+
+          if [ "$USE_ORCHESTRATOR" = true ]; then
+            # ── Layered: group affected services by (layer, domain) ──
+            declare -A LAYER_DOMAIN_SVCS
+
+            for domain in $(printf '%s\n' "${AFFECTED_DOMAINS[@]}" | sort); do
+              DOMAIN_SVCS=()
+              if [ "$SVC_MODE" = "all" ]; then
+                for svc_dir in "services/${domain}"/*/; do
+                  [ -d "$svc_dir" ] || continue
+                  DOMAIN_SVCS+=("$(basename "$svc_dir")")
+                done
+              else
+                unset _SEEN_D 2>/dev/null; declare -A _SEEN_D
+                while IFS= read -r file; do
+                  if [[ "$file" =~ ^services/${domain}/([^/]+)/ ]]; then
+                    svc="${BASH_REMATCH[1]}"
+                    if [ -z "${_SEEN_D[$svc]+_}" ] && [ -d "services/${domain}/${svc}" ]; then
+                      _SEEN_D["$svc"]=1
+                      DOMAIN_SVCS+=("$svc")
+                    fi
+                  fi
+                done <<< "$CHANGED_FILES"
+              fi
+
+              for svc in "${DOMAIN_SVCS[@]}"; do
+                key="${domain}/${svc}"
+                layer="${LAYER_OF[$key]:-0}"
+                lk="${layer}:${domain}"
+                if [ -z "${LAYER_DOMAIN_SVCS[$lk]+_}" ]; then
+                  LAYER_DOMAIN_SVCS["$lk"]=$(jq -cn --arg s "$svc" '[$s]')
+                else
+                  LAYER_DOMAIN_SVCS["$lk"]=$(echo "${LAYER_DOMAIN_SVCS[$lk]}" | jq -c --arg s "$svc" '. + [$s]')
+                fi
+              done
+            done
+
+            # Call build_chunks for each (layer, domain), sorted by layer then domain
+            for lk in $(printf '%s\n' "${!LAYER_DOMAIN_SVCS[@]}" | sort -t: -k1,1n -k2,2); do
+              layer="${lk%%:*}"
+              domain="${lk#*:}"
+              svcs_json="${LAYER_DOMAIN_SVCS[$lk]}"
+              build_chunks "$domain" "explicit" "$layer" "$svcs_json"
+            done
+          else
+            # ── Standard (no orchestrator): all services at layer 0 ──
+            for domain in $(printf '%s\n' "${AFFECTED_DOMAINS[@]}" | sort); do
+              build_chunks "$domain" "$SVC_MODE" "0"
+            done
+          fi
+
+          DOMAIN_CHUNKS+="]"
+
+          if [ "$DOMAIN_CHUNKS" = "[]" ]; then
+            echo "No services to build."
+            echo "domain_chunks=[]" >> "$GITHUB_OUTPUT"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+
+            # ── Step Summary: nothing to build ──
+            {
+              echo "## 🔍 CI Execution Plan"
+              echo ""
+              echo "> No affected services detected — nothing to build."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Chunks: $DOMAIN_CHUNKS"
+            echo "domain_chunks=$DOMAIN_CHUNKS" >> "$GITHUB_OUTPUT"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+            # ── Step Summary: execution plan table ──
+            TOTAL_SERVICES=0
+            TOTAL_CHUNKS=0
+            {
+              if [ "$USE_ORCHESTRATOR" = true ]; then
+                echo "## 🔍 CI Execution Plan (Layered)"
+              else
+                echo "## 🔍 CI Execution Plan"
+              fi
+              echo ""
+              echo "| # | Layer | Domain | Chunk | Services | Execution Model |"
+              echo "|---|-------|--------|-------|----------|-----------------|"
+              ROW=1
+              for chunk_obj in $(echo "$DOMAIN_CHUNKS" | jq -c '.[]'); do
+                c_domain=$(echo "$chunk_obj" | jq -r '.domain')
+                c_idx=$(echo "$chunk_obj" | jq -r '.chunk')
+                c_layer=$(echo "$chunk_obj" | jq -r '.layer')
+                c_count=$(echo "$chunk_obj" | jq -r '.services | fromjson | length')
+                echo "| ${ROW} | ${c_layer} | \`${c_domain}\` | ${c_idx} | ${c_count} | 1 service = 1 job (parallel) |"
+                TOTAL_SERVICES=$((TOTAL_SERVICES + c_count))
+                TOTAL_CHUNKS=$((TOTAL_CHUNKS + 1))
+                ROW=$((ROW + 1))
+              done
+              echo ""
+              echo "---"
+              echo ""
+              echo "**Total:** ${TOTAL_SERVICES} services across ${TOTAL_CHUNKS} chunk(s)"
+              echo ""
+              echo "**Architecture:**  \`ci.yml\` → \`domain-ci.yml\` (reusable #1) → \`service-ci.yml\` (reusable #2) → composite actions"
+              echo ""
+              echo "**Reusable workflows used:** 2 / 50 limit"
+              echo ""
+              echo "**Matrix limit:** ≤256 per chunk (GitHub maximum)"
+
+              # ── Orchestrator-only visualizations ──
+              if [ "$USE_ORCHESTRATOR" = true ]; then
+                ORCH_SVC_COUNT=$(echo "$ALL_ORCH_SVCS" | wc -w | tr -d ' ')
+                echo ""
+                echo "---"
+                echo ""
+                echo "### 📦 Orchestrator Status"
+                echo ""
+                echo "| Property | Value |"
+                echo "|----------|-------|"
+                echo "| **Mode** | Dependency-aware (orchestrator.yaml) |"
+                echo "| **Algorithm** | Kahn's Algorithm (topological sort) |"
+                echo "| **Services with deps** | ${ORCH_SVC_COUNT} |"
+                echo "| **Layers computed** | $((MAX_LAYER + 1)) (0–${MAX_LAYER}) |"
+                echo "| **Remaining services** | Layer 0 (no deps / not in orchestrator) |"
+                echo ""
+                echo "---"
+                echo ""
+                echo "### 🗺️ Dependency Graph"
+                echo ""
+                echo '```mermaid'
+                echo "graph LR"
+
+                # Define layer subgraphs with color coding
+                for (( l=0; l<=MAX_LAYER; l++ )); do
+                  echo "  subgraph L${l}[\"Layer ${l}\"]"
+                  for svc in $(printf '%s\n' "${!LAYER_OF[@]}" | sort); do
+                    if [ "${LAYER_OF[$svc]}" -eq "$l" ]; then
+                      svc_id=$(echo "$svc" | tr '/-' '__')
+                      echo "    ${svc_id}[\"${svc}\"]"
+                    fi
+                  done
+                  echo "  end"
+                done
+
+                # Edges
+                if [ -n "$MERMAID_EDGES" ]; then
+                  echo -n "$MERMAID_EDGES"
+                fi
+
+                # Layer styling
+                echo "  style L0 fill:#d4edda,stroke:#28a745"
+                echo "  style L1 fill:#cce5ff,stroke:#007bff"
+                if [ "$MAX_LAYER" -ge 2 ]; then
+                  echo "  style L2 fill:#fff3cd,stroke:#ffc107"
+                fi
+                if [ "$MAX_LAYER" -ge 3 ]; then
+                  echo "  style L3 fill:#f8d7da,stroke:#dc3545"
+                fi
+                echo '```'
+                echo ""
+                echo "---"
+                echo ""
+                echo "### 📊 Layer Breakdown"
+                echo ""
+                for (( l=0; l<=MAX_LAYER; l++ )); do
+                  LAYER_COUNT=0
+                  LAYER_LIST=""
+                  for svc in $(printf '%s\n' "${!LAYER_OF[@]}" | sort); do
+                    if [ "${LAYER_OF[$svc]}" -eq "$l" ]; then
+                      LAYER_COUNT=$((LAYER_COUNT + 1))
+                      LAYER_LIST+="- \`${svc}\`"$'\n'
+                    fi
+                  done
+                  echo "<details><summary><strong>Layer ${l}</strong> — ${LAYER_COUNT} service(s)</summary>"
+                  echo ""
+                  echo -n "$LAYER_LIST"
+                  echo ""
+                  echo "</details>"
+                  echo ""
+                done
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # STAGE 2 — Fan out: one child workflow call per domain-chunk
+  #           Each child runs a pure parallel matrix (1 job = 1 service)
+  # ---------------------------------------------------------------------------
+  domain-ci:
+    name: "L${{ matrix.chunk.layer }} \U0001F4E6 ${{ matrix.chunk.domain }} — chunk #${{ matrix.chunk.chunk }}"
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: ${{ fromJson(needs.detect-changes.outputs.domain_chunks) }}
+    uses: ./.github/workflows/domain-ci.yml
+    with:
+      domain: ${{ matrix.chunk.domain }}
+      # Pre-sliced JSON array of service names (always ≤256)
+      services: ${{ matrix.chunk.services }}
+
+  # ---------------------------------------------------------------------------
+  # STAGE 3 — Summary gate (useful as a required status check)
+  # ---------------------------------------------------------------------------
+  ci-complete:
+    name: "\u2705 CI Complete"
+    runs-on: [self-hosted, arc-runner]
+    needs: [detect-changes, domain-ci]
+    if: always()
+    steps:
+      - name: Evaluate results
+        run: |
+          if [ "${{ needs.detect-changes.outputs.has_changes }}" != "true" ]; then
+            echo "✅ No services changed — nothing to build."
+            exit 0
+          fi
+          if [ "${{ needs.domain-ci.result }}" = "success" ]; then
+            echo "✅ All domain CI pipelines passed."
+          elif [ "${{ needs.domain-ci.result }}" = "skipped" ]; then
+            echo "⏭️  Domain CI was skipped."
+          else
+            echo "❌ One or more domain CI pipelines failed."
+            exit 1
+          fi
+
+      - name: Write final summary
+        if: always()
+        shell: bash
+        run: |
+          RESULT="${{ needs.domain-ci.result }}"
+          HAS_CHANGES="${{ needs.detect-changes.outputs.has_changes }}"
+          CHUNKS='${{ needs.detect-changes.outputs.domain_chunks }}'
+
+          if [ "$HAS_CHANGES" != "true" ]; then
+            STATUS_ICON="⏭️"
+            STATUS_TEXT="Skipped — no changes detected"
+          elif [ "$RESULT" = "success" ]; then
+            STATUS_ICON="✅"
+            STATUS_TEXT="All services passed"
+          elif [ "$RESULT" = "skipped" ]; then
+            STATUS_ICON="⏭️"
+            STATUS_TEXT="Skipped"
+          else
+            STATUS_ICON="❌"
+            STATUS_TEXT="One or more services failed"
+          fi
+
+          # Derive orchestrator stats from chunk data
+          MAX_LAYER=$(echo "$CHUNKS" | jq '[.[].layer | tonumber] | max // 0' 2>/dev/null || echo "0")
+          TOTAL_SVCS=$(echo "$CHUNKS" | jq '[.[].services | fromjson | length] | add // 0' 2>/dev/null || echo "0")
+          TOTAL_CHUNKS=$(echo "$CHUNKS" | jq 'length' 2>/dev/null || echo "0")
+
+          if [ "$MAX_LAYER" -gt 0 ]; then
+            ORCH_LINE="✅ Active — $((MAX_LAYER + 1)) layers (0–${MAX_LAYER})"
+          else
+            ORCH_LINE="ℹ️ Standard mode (all services → layer 0)"
+          fi
+
+          {
+            echo ""
+            echo "## ${STATUS_ICON} CI Summary"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| **Result** | ${STATUS_TEXT} |"
+            echo "| **Domain CI result** | \`${RESULT}\` |"
+            echo "| **Services** | ${TOTAL_SVCS} across ${TOTAL_CHUNKS} chunk(s) |"
+            echo "| **Execution model** | Full parallel — 1 service = 1 job |"
+            echo "| **Dependency layering** | ${ORCH_LINE} |"
+            echo "| **Reusable workflows** | 2 of 50 (domain-ci.yml + service-ci.yml) |"
+            echo "| **Composite actions** | node-ci, python-ci, go-ci, java-ci |"
+            echo "| **Matrix limit** | ≤256 per chunk (enforced by parent) |"
+            echo ""
+            echo "---"
+            echo ""
+            echo "**Architecture:**"
+            echo '```'
+            echo "ci.yml (orchestrator)"
+            echo "  └─ domain-ci.yml (reusable #1 — matrix over services)"
+            echo "       └─ service-ci.yml (reusable #2 — config + detect + dispatch)"
+            echo "            ├─ .github/actions/node-ci      (composite)"
+            echo "            ├─ .github/actions/python-ci    (composite)"
+            echo "            ├─ .github/actions/go-ci        (composite)"
+            echo "            └─ .github/actions/java-ci      (composite)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

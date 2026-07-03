@@ -1,0 +1,200 @@
+name: CI - Clickstream Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/data/clickstream-pipeline/**"
+      - ".github/workflows/ci-clickstream-pipeline.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/data/clickstream-pipeline/**"
+      - ".github/workflows/ci-clickstream-pipeline.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/data/clickstream-pipeline
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: clickstream-pipeline
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/clickstream-pipeline/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install lint tools
+        run: pip install flake8 black isort mypy
+
+      - name: Run flake8
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: flake8 src/ --max-line-length=120 --extend-ignore=E203,W503
+
+      - name: Check black formatting
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: black --check src/
+
+      - name: Check import ordering
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: isort --check-only --diff src/
+
+      - name: Run mypy on streaming processors
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: mypy src/processors/ --ignore-missing-imports --strict
+
+  unit-test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/clickstream-pipeline/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          ENVIRONMENT: test
+          KAFKA_BOOTSTRAP_SERVERS: ""
+        run: |
+          pytest tests/unit/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            -v --tb=short
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: clickstream-coverage
+          path: ${{ env.SERVICE_DIR }}/coverage.xml
+
+  schema-registry-check:
+    name: Validate Avro Schemas
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install schema registry client
+        run: pip install confluent-kafka fastavro avro-python3 requests
+
+      - name: Validate Avro schema files are well-formed
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: python scripts/validate_avro_schemas.py --schema-dir schemas/avro/
+
+      - name: Check schemas against dev Schema Registry
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          SCHEMA_REGISTRY_URL: ${{ secrets.CONFLUENT_SCHEMA_REGISTRY_DEV_URL }}
+          SCHEMA_REGISTRY_API_KEY: ${{ secrets.CONFLUENT_SCHEMA_REGISTRY_API_KEY }}
+          SCHEMA_REGISTRY_API_SECRET: ${{ secrets.CONFLUENT_SCHEMA_REGISTRY_API_SECRET }}
+        run: |
+          python scripts/check_schema_compatibility.py \
+            --schema-dir schemas/avro/ \
+            --compatibility-level BACKWARD
+
+  docker-build:
+    name: Docker Build
+    needs: schema-registry-check
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_dir: services/data/clickstream-pipeline
+      image_name: clickstream-pipeline
+      dockerfile: services/data/clickstream-pipeline/Dockerfile
+    secrets: inherit
+
+  load-test:
+    name: Load Test - Event Throughput
+    runs-on: ubuntu-latest
+    needs: docker-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up k6
+        run: |
+          curl https://github.com/grafana/k6/releases/download/v0.50.0/k6-v0.50.0-linux-amd64.tar.gz -L | tar xvz
+          sudo mv k6-v0.50.0-linux-amd64/k6 /usr/local/bin/
+
+      - name: Run k6 event throughput test
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          K6_TARGET_EVENTS_PER_SEC: "10000"
+          K6_DURATION: "60s"
+          K6_VUS: "50"
+        run: |
+          k6 run load-tests/event_throughput.js \
+            --env TARGET_RPS=${{ env.K6_TARGET_EVENTS_PER_SEC }} \
+            --env DURATION=${{ env.K6_DURATION }} \
+            --summary-export=load-test-results.json
+
+      - name: Validate throughput results
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: python scripts/validate_load_results.py --results load-test-results.json --min-rps 10000
+
+      - name: Upload load test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: clickstream-load-test-results
+          path: ${{ env.SERVICE_DIR }}/load-test-results.json
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: [docker-build, load-test]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: clickstream-pipeline
+      namespace: data-pipeline
+      image_tag: ${{ github.sha }}
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [deploy-staging, load-test]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      workflow_name: "Clickstream Pipeline CI"
+      service_name: clickstream-pipeline
+      environment: staging
+    secrets: inherit

@@ -1,0 +1,91 @@
+# =============================================================================
+# Dependabot — Automated dependency updates
+# =============================================================================
+version: 2
+
+updates:
+  # Root workspace
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    groups:
+      dev-tools:
+        patterns: ["turbo", "typescript", "eslint*", "prettier", "jest*"]
+      shared-packages:
+        patterns: ["@zillow/*"]
+    labels: ["dependencies", "automerge"]
+    open-pull-requests-limit: 5
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "github-actions"]
+    groups:
+      actions:
+        patterns: ["actions/*", "docker/*"]
+
+  # Analytics services
+  - package-ecosystem: "npm"
+    directory: "/services/analytics/ad-analytics-service"
+    schedule: { interval: "weekly" }
+    labels: ["dependencies", "analytics"]
+
+  - package-ecosystem: "npm"
+    directory: "/services/analytics/dashboard-service"
+    schedule: { interval: "weekly" }
+    labels: ["dependencies", "analytics"]
+
+  # Auth services
+  - package-ecosystem: "npm"
+    directory: "/services/auth/auth-service"
+    schedule: { interval: "weekly" }
+    labels: ["dependencies", "auth", "security"]
+
+  - package-ecosystem: "npm"
+    directory: "/services/auth/token-service"
+    schedule: { interval: "weekly" }
+    labels: ["dependencies", "auth", "security"]
+
+  # Backend — high-priority services
+  - package-ecosystem: "npm"
+    directory: "/services/backend/listing-service"
+    schedule: { interval: "weekly" }
+    labels: ["dependencies", "backend"]
+
+  - package-ecosystem: "npm"
+    directory: "/services/backend/zestimate-service"
+    schedule: { interval: "weekly" }
+    labels: ["dependencies", "backend"]
+
+  - package-ecosystem: "npm"
+    directory: "/services/backend/mortgage-service"
+    schedule: { interval: "weekly" }
+    labels: ["dependencies", "backend"]
+
+  # Frontend — main apps
+  - package-ecosystem: "npm"
+    directory: "/services/frontend/zillow-web"
+    schedule: { interval: "weekly" }
+    labels: ["dependencies", "frontend"]
+
+  - package-ecosystem: "npm"
+    directory: "/services/frontend/search-ui"
+    schedule: { interval: "weekly" }
+    labels: ["dependencies", "frontend"]
+
+  # Shared packages
+  - package-ecosystem: "npm"
+    directory: "/packages/shared-types"
+    schedule: { interval: "weekly" }
+    labels: ["dependencies", "shared"]
+
+  - package-ecosystem: "npm"
+    directory: "/packages/shared-utils"
+    schedule: { interval: "weekly" }
+    labels: ["dependencies", "shared"]

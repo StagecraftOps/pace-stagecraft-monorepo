@@ -1,0 +1,111 @@
+name: "Template: Python CI"
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      python_version:
+        required: false
+        type: string
+        default: "3.11"
+      working_directory:
+        required: true
+        type: string
+      run_integration:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      CODECOV_TOKEN:
+        required: false
+      PYPI_TOKEN:
+        required: false
+
+jobs:
+  python-ci:
+    name: "Python CI — ${{ inputs.service_name }}"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python ${{ inputs.python_version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ${{ inputs.working_directory }}/.venv
+          key: ${{ runner.os }}-pip-${{ inputs.python_version }}-${{ hashFiles(format('{0}/pyproject.toml', inputs.working_directory), format('{0}/requirements*.txt', inputs.working_directory)) }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ inputs.python_version }}-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint (Ruff)
+        run: ruff check . --output-format=github
+
+      - name: Type check (mypy)
+        run: mypy . --ignore-missing-imports --show-error-codes
+
+      - name: Run tests (pytest with coverage)
+        run: |
+          pytest \
+            --cov=. \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            --junitxml=test-results.xml \
+            -v
+        env:
+          PYTHONDONTWRITEBYTECODE: 1
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ inputs.working_directory }}/coverage.xml
+          flags: ${{ inputs.service_name }}
+          fail_ci_if_error: false
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ inputs.service_name }}-test-results-${{ github.sha }}
+          path: ${{ inputs.working_directory }}/test-results.xml
+          retention-days: 7
+
+      - name: Build wheel
+        run: python -m build --wheel
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.service_name }}-wheel-${{ github.sha }}
+          path: ${{ inputs.working_directory }}/dist/*.whl
+          retention-days: 7
+
+      - name: Run integration tests (optional)
+        if: inputs.run_integration
+        run: |
+          pytest tests/integration/ \
+            --junitxml=integration-test-results.xml \
+            -v \
+            --timeout=120
+        env:
+          PYTHONDONTWRITEBYTECODE: 1

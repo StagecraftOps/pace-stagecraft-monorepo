@@ -1,0 +1,172 @@
+name: "CI — search-ranking-model"
+
+on:
+  push:
+    paths:
+      - "services/ml/search-ranking-model/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/ml/search-ranking-model/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-search-ranking-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: search-ranking-${{ hashFiles('services/ml/search-ranking-model/requirements*.txt') }}
+          restore-keys: search-ranking-
+      - name: Install package with dev extras
+        run: pip install -e ".[dev]"
+        working-directory: services/ml/search-ranking-model
+      - name: Lint with ruff
+        run: ruff check . --output-format=github
+        working-directory: services/ml/search-ranking-model
+      - name: Type check with mypy
+        run: mypy src/ --ignore-missing-imports
+        working-directory: services/ml/search-ranking-model
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: [lint-typecheck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: search-ranking-${{ hashFiles('services/ml/search-ranking-model/requirements*.txt') }}
+          restore-keys: search-ranking-
+      - name: Install package with dev extras
+        run: pip install -e ".[dev]"
+        working-directory: services/ml/search-ranking-model
+      - name: Run unit tests with coverage
+        run: pytest tests/unit/ -v --cov=src --cov-report=xml --cov-fail-under=80
+        working-directory: services/ml/search-ranking-model
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-ranking-coverage
+          path: services/ml/search-ranking-model/coverage.xml
+
+  feature-pipeline-test:
+    runs-on: ubuntu-latest
+    needs: [lint-typecheck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: search-ranking-${{ hashFiles('services/ml/search-ranking-model/requirements*.txt') }}
+          restore-keys: search-ranking-
+      - name: Install package with dev extras
+        run: pip install -e ".[dev]"
+        working-directory: services/ml/search-ranking-model
+      - name: Test all feature extraction functions
+        run: pytest tests/features/ -v
+        working-directory: services/ml/search-ranking-model
+      - name: Check feature coverage (all 47 ranking features, 0 nulls)
+        run: python scripts/check_feature_coverage.py
+        working-directory: services/ml/search-ranking-model
+      - name: Upload feature coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-ranking-feature-coverage
+          path: services/ml/search-ranking-model/feature-coverage-report.json
+
+  offline-evaluation:
+    runs-on: ubuntu-latest
+    needs: [unit-test, feature-pipeline-test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: search-ranking-${{ hashFiles('services/ml/search-ranking-model/requirements*.txt') }}
+          restore-keys: search-ranking-
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-1
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+      - name: Install package with ML extras
+        run: pip install -e ".[dev]" scikit-learn lightgbm
+        working-directory: services/ml/search-ranking-model
+      - name: Run offline evaluation (NDCG@10, MRR)
+        run: >
+          python scripts/offline_eval.py
+          --model s3://ml-models-staging/ranking/candidate
+          --test-data data/fixtures/ranking_test.parquet
+          --output offline_metrics.json
+        working-directory: services/ml/search-ranking-model
+      - name: Check ranking thresholds (NDCG@10 >= 0.40, MRR >= 0.55)
+        run: >
+          python scripts/check_ranking_thresholds.py
+          --metrics offline_metrics.json
+          --min-ndcg10 0.40
+          --min-mrr 0.55
+        working-directory: services/ml/search-ranking-model
+      - name: Upload offline metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-ranking-offline-metrics
+          path: services/ml/search-ranking-model/offline_metrics.json
+
+  build:
+    needs: [offline-evaluation]
+    uses: ./.github/workflows/_template-python-ci.yml
+    with:
+      service_name: search-ranking-model
+      python_version: "3.11"
+      working_directory: services/ml/search-ranking-model
+      run_integration: false
+    secrets: inherit
+
+  docker-build:
+    needs: [offline-evaluation]
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: search-ranking-model
+      dockerfile_path: services/ml/search-ranking-model/Dockerfile
+      ecr_repository: stagecraft/search-ranking-model
+      image_tag: ${{ github.sha }}
+      push_image: true
+    secrets: inherit
+
+  deploy-staging:
+    needs: [docker-build]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: search-ranking-model
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: ml
+      helm_chart_path: charts/search-ranking-model
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

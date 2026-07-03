@@ -1,0 +1,160 @@
+name: "CI — search-ui"
+
+on:
+  push:
+    paths:
+      - "services/frontend/search-ui/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/frontend/search-ui/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-search-ui-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-search-ui-${{ hashFiles('services/frontend/search-ui/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-search-ui-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/search-ui
+      - name: Lint (ESLint)
+        run: npm run lint
+        working-directory: services/frontend/search-ui
+      - name: Format check (Prettier)
+        run: npm run format:check
+        working-directory: services/frontend/search-ui
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-search-ui-${{ hashFiles('services/frontend/search-ui/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-search-ui-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/search-ui
+      - name: TypeScript type check
+        run: npm run type-check
+        working-directory: services/frontend/search-ui
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: [lint, type-check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-search-ui-${{ hashFiles('services/frontend/search-ui/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-search-ui-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/search-ui
+      - name: Run unit tests with coverage
+        run: npm test -- --ci --coverage --coverageThreshold='{"global":{"lines":82}}'
+        working-directory: services/frontend/search-ui
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-ui-coverage
+          path: services/frontend/search-ui/coverage/
+
+  perf-budget:
+    runs-on: ubuntu-latest
+    needs: [unit-test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-search-ui-${{ hashFiles('services/frontend/search-ui/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-search-ui-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/search-ui
+      - name: Build
+        run: npm run build
+        working-directory: services/frontend/search-ui
+      - name: Run Lighthouse CI (performance budget)
+        run: npx @lhci/cli@0.14.x autorun
+        working-directory: services/frontend/search-ui
+        env:
+          LHCI_BUILD_CONTEXT__CURRENT_HASH: ${{ github.sha }}
+      - name: Upload Lighthouse results
+        uses: actions/upload-artifact@v4
+        with:
+          name: search-ui-lighthouse
+          path: services/frontend/search-ui/.lighthouseci/
+
+  security-scan:
+    needs: [lint]
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: search-ui
+      working_directory: services/frontend/search-ui
+      severity_threshold: MEDIUM
+    secrets: inherit
+
+  build:
+    needs: [unit-test, perf-budget, security-scan]
+    uses: ./.github/workflows/_template-node-ci.yml
+    with:
+      service_name: search-ui
+      node_version: "20"
+      working_directory: services/frontend/search-ui
+      run_e2e: false
+    secrets: inherit
+
+  e2e-test:
+    needs: [build]
+    uses: ./.github/workflows/_template-e2e-test.yml
+    with:
+      service_name: search-ui
+      base_url: https://staging-search.internal
+      browser_list: chromium
+      test_grep_pattern: "filter|map|sort|save search"
+    secrets: inherit
+
+  deploy-staging:
+    needs: [e2e-test]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: search-ui
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: frontend
+      helm_chart_path: charts/search-ui
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

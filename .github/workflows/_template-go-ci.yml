@@ -1,0 +1,101 @@
+name: "Template: Go CI"
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      go_version:
+        required: false
+        type: string
+        default: "1.22"
+      working_directory:
+        required: true
+        type: string
+    secrets:
+      CODECOV_TOKEN:
+        required: false
+
+jobs:
+  go-ci:
+    name: "Go CI — ${{ inputs.service_name }}"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go ${{ inputs.go_version }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version }}
+          cache-dependency-path: ${{ inputs.working_directory }}/go.sum
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ inputs.go_version }}-${{ hashFiles(format('{0}/go.sum', inputs.working_directory)) }}
+          restore-keys: |
+            ${{ runner.os }}-go-${{ inputs.go_version }}-
+
+      - name: Download Go modules
+        run: go mod download && go mod verify
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: ${{ inputs.working_directory }}
+          args: --timeout=5m --out-format=github-actions
+
+      - name: Run tests with race detector and coverage
+        run: |
+          go test \
+            -race \
+            -coverprofile=coverage.out \
+            -covermode=atomic \
+            -v \
+            -timeout=10m \
+            ./...
+
+      - name: Generate coverage report
+        run: go tool cover -html=coverage.out -o coverage.html
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ inputs.working_directory }}/coverage.out
+          flags: ${{ inputs.service_name }}
+          fail_ci_if_error: false
+
+      - name: Build binary
+        run: |
+          go build \
+            -ldflags="-w -s -X main.version=${{ github.sha }} -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o bin/${{ inputs.service_name }} \
+            ./cmd/...
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.service_name }}-binary-${{ github.sha }}
+          path: ${{ inputs.working_directory }}/bin/${{ inputs.service_name }}
+          retention-days: 7
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Check go mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum || (echo "go.mod or go.sum is not tidy — run 'go mod tidy' and commit" && exit 1)

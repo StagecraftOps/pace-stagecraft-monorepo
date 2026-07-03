@@ -1,0 +1,198 @@
+name: CI - Image Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/media/image-service/**"
+      - ".github/workflows/ci-image-service.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/media/image-service/**"
+      - ".github/workflows/ci-image-service.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/media/image-service
+  GO_VERSION: "1.22"
+  COVERAGE_THRESHOLD: "80"
+
+jobs:
+  lint:
+    name: Lint (golangci-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/go.sum
+
+      - name: Install system dependencies for CGO/libvips
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libvips-dev pkg-config
+
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | \
+            sh -s -- -b $(go env GOPATH)/bin v1.57.2
+
+      - name: Run golangci-lint
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: golangci-lint run --timeout 5m ./...
+
+      - name: Run go vet
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go vet ./...
+
+  unit-test:
+    name: Unit Tests (go test, 80% coverage, race detector)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/go.sum
+
+      - name: Install system dependencies for CGO/libvips
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libvips-dev pkg-config
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('services/media/image-service/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Run unit tests with race detector
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          go test -race -coverprofile=coverage.out -covermode=atomic ./...
+          go tool cover -func=coverage.out | grep total | awk '{print $3}' | \
+            awk -F'%' '{if ($1 < ${{ env.COVERAGE_THRESHOLD }}) {print "Coverage "$1"% is below threshold ${{ env.COVERAGE_THRESHOLD }}%"; exit 1} else {print "Coverage "$1"% meets threshold"}}'
+
+      - name: Generate coverage report
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go tool cover -html=coverage.out -o coverage.html
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: go-coverage-report
+          path: ${{ env.SERVICE_DIR }}/coverage.html
+
+  image-processing-test:
+    name: Image Processing Tests (resize, crop, WebP)
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/go.sum
+
+      - name: Install libvips and image tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libvips-dev pkg-config imagemagick webp
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('services/media/image-service/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Cache sample image fixtures
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SERVICE_DIR }}/tests/fixtures/images
+          key: ${{ runner.os }}-image-fixtures-v1
+
+      - name: Run image resize correctness tests
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go test -v -run TestResize ./tests/processing/...
+
+      - name: Run image crop correctness tests
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go test -v -run TestCrop ./tests/processing/...
+
+      - name: Run WebP conversion tests
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go test -v -run TestWebPConversion ./tests/processing/...
+
+      - name: Validate output dimensions accuracy
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go test -v -run TestDimensionAccuracy ./tests/processing/...
+
+      - name: Run EXIF stripping validation
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go test -v -run TestExifStripping ./tests/processing/...
+
+  docker-build:
+    name: Docker Build
+    needs: image-processing-test
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service-name: image-service
+      dockerfile-path: services/media/image-service/Dockerfile
+      context-path: services/media/image-service
+      image-tag: ${{ github.sha }}
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service-name: image-service
+      service-dir: services/media/image-service
+      compose-file: services/media/image-service/docker-compose.test.yml
+      test-command: "go test -v -timeout 300s ./tests/integration/..."
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      service-name: image-service
+      environment: staging
+      image-tag: ${{ github.sha }}
+      namespace: media-staging
+      helm-values-file: services/media/image-service/helm/values-staging.yaml
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [lint, unit-test, image-processing-test, docker-build, integration-test, deploy-staging]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service-name: image-service
+      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      channel: "#media-ci"
+    secrets: inherit

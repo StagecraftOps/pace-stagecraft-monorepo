@@ -1,0 +1,246 @@
+name: "Release: Production"
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Release version (semver, e.g. 1.4.2)"
+        required: true
+        type: string
+      release_notes:
+        description: "Release notes / changelog summary"
+        required: true
+        type: string
+      skip_canary:
+        description: "Skip canary deployment (emergency releases only)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-production
+  cancel-in-progress: false
+
+jobs:
+  validate-inputs:
+    name: "Validate Release Inputs"
+    runs-on: ubuntu-latest
+    outputs:
+      release_version: ${{ steps.validate.outputs.release_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate semver format
+        id: validate
+        run: |
+          VERSION="${{ inputs.release_version }}"
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?$'; then
+            echo "ERROR: '$VERSION' is not a valid semver string"
+            exit 1
+          fi
+          echo "release_version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version $VERSION is valid semver"
+
+      - name: Check for active incidents
+        run: |
+          STATUS=$(curl -sf "https://status.zillow.com/api/v2/summary.json" | jq -r '.status.indicator' 2>/dev/null || echo "none")
+          if [ "$STATUS" = "critical" ] || [ "$STATUS" = "major" ]; then
+            echo "ERROR: Active incident detected (status=$STATUS). Aborting production release."
+            exit 1
+          fi
+          echo "No active incidents — proceeding with release"
+
+  create-release-branch:
+    name: "Create Release Branch"
+    runs-on: ubuntu-latest
+    needs: validate-inputs
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Create and push release branch
+        run: |
+          BRANCH="release/v${{ needs.validate-inputs.outputs.release_version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          echo "${{ needs.validate-inputs.outputs.release_version }}" > VERSION
+          git add VERSION
+          git commit -m "chore: bump version to ${{ needs.validate-inputs.outputs.release_version }}"
+          git push origin "$BRANCH"
+
+  run-full-test-suite:
+    name: "Full Integration Test Suite"
+    needs: create-release-branch
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: "release-validation"
+      test_suite: "integration"
+      test_timeout_minutes: 60
+    secrets: inherit
+
+  security-audit:
+    name: "Security Audit"
+    needs: create-release-branch
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: "release-security-audit"
+      working_directory: "."
+      severity_threshold: "HIGH"
+    secrets: inherit
+
+  build-all-images:
+    name: "Build Critical Service Images"
+    needs: [run-full-test-suite, security-audit]
+    strategy:
+      fail-fast: true
+      matrix:
+        service:
+          - name: listing-service
+            ecr_repo: listing-service
+          - name: search-api
+            ecr_repo: search-api
+          - name: auth-service
+            ecr_repo: auth-service
+          - name: payment-service
+            ecr_repo: payment-service
+          - name: user-service
+            ecr_repo: user-service
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: ${{ matrix.service.name }}
+      ecr_repository: ${{ matrix.service.ecr_repo }}
+      image_tag: "v${{ inputs.release_version }}"
+      push_image: true
+    secrets: inherit
+
+  canary-deploy:
+    name: "Canary Deployment (5% Traffic)"
+    needs: build-all-images
+    if: inputs.skip_canary == false
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: production-canary
+      service_name: "search-api"
+      image_tag: "v${{ inputs.release_version }}"
+      cluster_name: "prod-eks-cluster"
+      namespace: "production"
+      replicas: 1
+      wait_for_rollout: true
+    secrets: inherit
+
+  canary-validation:
+    name: "Canary Health Validation"
+    needs: canary-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for canary traffic stabilization
+        run: sleep 600
+
+      - name: Query Datadog error rate for canary
+        run: |
+          ERROR_RATE=$(curl -sf \
+            -H "DD-API-KEY: ${{ secrets.DATADOG_API_KEY }}" \
+            -H "DD-APPLICATION-KEY: ${{ secrets.DATADOG_APP_KEY }}" \
+            "https://api.datadoghq.com/api/v1/query?query=sum:search_api.errors.rate{env:production-canary}&from=$(date -d '5 minutes ago' +%s)&to=$(date +%s)" \
+            | jq -r '.series[0].pointlist[-1][1] // "0"')
+          echo "Canary error rate: $ERROR_RATE"
+          if (( $(echo "$ERROR_RATE > 0.01" | bc -l) )); then
+            echo "ERROR: Canary error rate $ERROR_RATE exceeds 1% threshold"
+            exit 1
+          fi
+
+      - name: Query Datadog p99 latency for canary
+        run: |
+          P99=$(curl -sf \
+            -H "DD-API-KEY: ${{ secrets.DATADOG_API_KEY }}" \
+            -H "DD-APPLICATION-KEY: ${{ secrets.DATADOG_APP_KEY }}" \
+            "https://api.datadoghq.com/api/v1/query?query=p99:search_api.request.duration{env:production-canary}&from=$(date -d '5 minutes ago' +%s)&to=$(date +%s)" \
+            | jq -r '.series[0].pointlist[-1][1] // "0"')
+          echo "Canary p99 latency: ${P99}ms"
+          if (( $(echo "$P99 > 500" | bc -l) )); then
+            echo "ERROR: p99 latency ${P99}ms exceeds 500ms threshold"
+            exit 1
+          fi
+
+  full-production-deploy:
+    name: "Full Production Deployment"
+    needs: canary-validation
+    environment: production
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: production
+      service_name: "all-services"
+      image_tag: "v${{ inputs.release_version }}"
+      cluster_name: "prod-eks-cluster"
+      namespace: "production"
+      replicas: 5
+      wait_for_rollout: true
+    secrets: inherit
+
+  post-deployment-tests:
+    name: "Post-Deployment Smoke & Synthetic Tests"
+    needs: full-production-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run smoke tests against production
+        run: |
+          ENDPOINTS=(
+            "https://www.zillow.com/health"
+            "https://api.zillow.com/search/health"
+            "https://api.zillow.com/listing/health"
+            "https://api.zillow.com/user/health"
+          )
+          for endpoint in "${ENDPOINTS[@]}"; do
+            HTTP_STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$endpoint" --max-time 10)
+            if [ "$HTTP_STATUS" != "200" ]; then
+              echo "FAIL: $endpoint returned HTTP $HTTP_STATUS"
+              exit 1
+            fi
+            echo "PASS: $endpoint ($HTTP_STATUS)"
+          done
+
+      - name: Trigger Datadog synthetic monitor check
+        run: |
+          curl -sf -X POST \
+            -H "DD-API-KEY: ${{ secrets.DATADOG_API_KEY }}" \
+            -H "DD-APPLICATION-KEY: ${{ secrets.DATADOG_APP_KEY }}" \
+            "https://api.datadoghq.com/api/v1/synthetics/tests/trigger/ci" \
+            -d '{"tests": [{"public_id": "abc-def-ghi"}]}'
+
+  create-github-release:
+    name: "Create GitHub Release"
+    needs: post-deployment-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ inputs.release_version }}" \
+            --title "Release v${{ inputs.release_version }}" \
+            --notes "${{ inputs.release_notes }}" \
+            --latest
+
+  notify-stakeholders:
+    name: "Notify Stakeholders"
+    needs: create-github-release
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service_name: "Production Platform"
+      environment: production
+      status: SUCCESS
+      image_tag: "v${{ inputs.release_version }}"
+      deploy_url: "https://www.zillow.com"
+      triggered_by: ${{ github.actor }}
+    secrets: inherit

@@ -1,0 +1,148 @@
+name: "CI — offer-service"
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "services/backend/offer-service/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/backend/offer-service/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-offer-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.22"
+  SERVICE_DIR: services/backend/offer-service
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-offer-${{ hashFiles('services/backend/offer-service/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-offer-
+
+      - name: Download Go modules
+        run: cd services/backend/offer-service && go mod download
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          working-directory: services/backend/offer-service
+          args: --timeout 5m --config ../../.golangci.yml
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-offer-${{ hashFiles('services/backend/offer-service/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-offer-
+
+      - name: Run unit tests with race detector
+        run: |
+          cd services/backend/offer-service
+          go test -race -count=1 -coverprofile=coverage.out -covermode=atomic -timeout 5m ./...
+
+      - name: Run offer state machine transition tests explicitly
+        run: |
+          cd services/backend/offer-service
+          go test -race -run TestOfferStateMachine ./... -v -count=1
+
+      - name: Assert 88% coverage threshold
+        run: |
+          cd services/backend/offer-service
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%')
+          echo "Coverage: $COVERAGE%"
+          awk "BEGIN{exit ($COVERAGE < 88)}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: offer-service-coverage
+          path: services/backend/offer-service/coverage.out
+
+  security-scan:
+    needs: lint
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: offer-service
+      working_directory: services/backend/offer-service
+      severity_threshold: HIGH
+    secrets: inherit
+
+  build:
+    needs: unit-test
+    uses: ./.github/workflows/_template-go-ci.yml
+    with:
+      service_name: offer-service
+      go_version: "1.22"
+      working_directory: services/backend/offer-service
+    secrets: inherit
+
+  docker-build:
+    needs: [build, security-scan]
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: offer-service
+      dockerfile_path: services/backend/offer-service/Dockerfile
+      ecr_repository: stagecraft/offer-service
+      image_tag: ${{ github.sha }}
+      push_image: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  integration-test:
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: offer-service
+      test_suite: offer-lifecycle
+      environment_url: http://localhost:8015
+      test_timeout_minutes: 20
+    secrets: inherit
+
+  e2e-test:
+    needs: integration-test
+    uses: ./.github/workflows/_template-e2e-test.yml
+    with:
+      service_name: offer-service
+      base_url: http://staging-web.internal
+      browser_list: chromium
+      test_grep_pattern: "offer|make an offer|counter"
+    secrets: inherit
+
+  deploy-staging:
+    needs: [integration-test, e2e-test]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: offer-service
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: backend
+      helm_chart_path: charts/offer-service
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

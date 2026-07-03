@@ -1,0 +1,182 @@
+name: CI - Feature Store Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/data/feature-store-pipeline/**"
+      - ".github/workflows/ci-feature-store-pipeline.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/data/feature-store-pipeline/**"
+      - ".github/workflows/ci-feature-store-pipeline.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/data/feature-store-pipeline
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: feature-store-pipeline
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/feature-store-pipeline/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install lint tools
+        run: pip install flake8 black isort mypy pylint
+
+      - name: Run flake8
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: flake8 src/ --max-line-length=120 --extend-ignore=E203,W503
+
+      - name: Check black formatting
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: black --check src/
+
+      - name: Check import ordering
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: isort --check-only --diff src/
+
+      - name: Run mypy on feature transformers
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: mypy src/transformers/ --ignore-missing-imports
+
+  unit-test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/feature-store-pipeline/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest with 80% coverage threshold
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          ENVIRONMENT: test
+          REDIS_URL: ""
+          DYNAMODB_ENDPOINT: ""
+        run: |
+          pytest tests/unit/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=80 \
+            -v --tb=short
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-store-coverage
+          path: ${{ env.SERVICE_DIR }}/coverage.xml
+
+  feature-validation:
+    name: Feature Schema Validation
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install validation dependencies
+        run: pip install pydantic jsonschema pyyaml
+
+      - name: Validate feature definitions against registry schema
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: python scripts/validate_feature_definitions.py --config feature_definitions.yml
+
+      - name: Check for duplicate feature names across groups
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: python scripts/check_feature_name_conflicts.py --dir feature_groups/
+
+      - name: Validate feature data types and constraints
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: python scripts/validate_feature_types.py --schema schemas/feature_schema.json
+
+      - name: Verify feature registry compatibility
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          FEATURE_REGISTRY_URL: ${{ secrets.FEATURE_REGISTRY_DEV_URL }}
+          FEATURE_REGISTRY_TOKEN: ${{ secrets.FEATURE_REGISTRY_TOKEN }}
+        run: python scripts/check_registry_compatibility.py --env dev
+
+  docker-build:
+    name: Docker Build
+    needs: feature-validation
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_dir: services/data/feature-store-pipeline
+      image_name: feature-store-pipeline
+      dockerfile: services/data/feature-store-pipeline/Dockerfile
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_dir: services/data/feature-store-pipeline
+      python_version: "3.11"
+      test_path: tests/integration/
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: feature-store-pipeline
+      namespace: data-pipeline
+      image_tag: ${{ github.sha }}
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [deploy-staging, integration-test]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      workflow_name: "Feature Store Pipeline CI"
+      service_name: feature-store-pipeline
+      environment: staging
+    secrets: inherit

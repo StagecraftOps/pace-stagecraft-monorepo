@@ -1,0 +1,1 @@
+﻿{"extends":"../../../../tsconfig.base.json","compilerOptions":{"jsx":"preserve","moduleResolution":"bundler"},"include":["src","next.config.js"]}

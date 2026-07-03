@@ -1,0 +1,192 @@
+name: CI - Market Data Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/data/market-data-pipeline/**"
+      - ".github/workflows/ci-market-data-pipeline.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/data/market-data-pipeline/**"
+      - ".github/workflows/ci-market-data-pipeline.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/data/market-data-pipeline
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: market-data-pipeline
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/market-data-pipeline/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install lint tools
+        run: pip install flake8 black isort mypy
+
+      - name: Run flake8
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: flake8 src/ --max-line-length=120 --extend-ignore=E203,W503
+
+      - name: Check black formatting
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: black --check src/
+
+      - name: Check import ordering
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: isort --check-only --diff src/
+
+      - name: Run mypy
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: mypy src/ --ignore-missing-imports
+
+  unit-test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('services/data/market-data-pipeline/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest with 80% coverage threshold
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          ENVIRONMENT: test
+          FRED_API_KEY: mock_key_for_testing
+          HOUSING_INDEX_API_KEY: mock_key_for_testing
+        run: |
+          pytest tests/unit/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=80 \
+            -v --tb=short
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-data-coverage
+          path: ${{ env.SERVICE_DIR }}/coverage.xml
+
+  source-validation:
+    name: Validate Data Sources
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install validation dependencies
+        run: pip install requests pyyaml tenacity
+
+      - name: Validate Federal Reserve FRED API is reachable
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: |
+          python scripts/validate_source.py \
+            --source fred \
+            --api-key ${{ env.FRED_API_KEY }} \
+            --series MORTGAGE30US FEDFUNDS
+
+      - name: Validate Case-Shiller Housing Index API
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          HOUSING_INDEX_API_KEY: ${{ secrets.HOUSING_INDEX_API_KEY }}
+        run: |
+          python scripts/validate_source.py \
+            --source case-shiller \
+            --api-key ${{ env.HOUSING_INDEX_API_KEY }}
+
+      - name: Validate BLS economic indicators endpoint
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          BLS_API_KEY: ${{ secrets.BLS_API_KEY }}
+        run: |
+          python scripts/validate_source.py \
+            --source bls \
+            --api-key ${{ env.BLS_API_KEY }} \
+            --series CUUR0000SA0 LNS14000000
+
+  docker-build:
+    name: Docker Build
+    needs: source-validation
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_dir: services/data/market-data-pipeline
+      image_name: market-data-pipeline
+      dockerfile: services/data/market-data-pipeline/Dockerfile
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_dir: services/data/market-data-pipeline
+      python_version: "3.11"
+      test_path: tests/integration/
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: market-data-pipeline
+      namespace: data-pipeline
+      image_tag: ${{ github.sha }}
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [deploy-staging, integration-test]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      workflow_name: "Market Data Pipeline CI"
+      service_name: market-data-pipeline
+      environment: staging
+    secrets: inherit

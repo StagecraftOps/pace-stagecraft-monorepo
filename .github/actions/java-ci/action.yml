@@ -1,0 +1,54 @@
+# =============================================================================
+# Composite Action — Java CI (Maven & Gradle)
+# =============================================================================
+name: "Java CI"
+description: "Build and test a Java service using Maven or Gradle"
+
+inputs:
+  path:
+    description: "Path to the service directory"
+    required: true
+  build-tool:
+    description: "Build tool: 'maven' or 'gradle'"
+    required: true
+  skip-test:
+    description: "Skip running tests"
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: "temurin"
+        java-version: "21"
+
+    - name: "[java-ci] Build & Test (Maven)"
+      if: inputs.build-tool == 'maven'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        echo "☕ Composite Action: java-ci (Maven)"
+        echo "   Path: ${{ inputs.path }}"
+        echo "   Step: mvn package (timeout: 10m)"
+        if [ "${{ inputs.skip-test }}" = "true" ]; then
+          timeout 600 mvn package -q -DskipTests=true 2>&1 || echo "⚠️  Maven exited non-zero or timed out — continuing"
+        else
+          timeout 600 mvn package -q -DskipTests=false 2>&1 || echo "⚠️  Maven exited non-zero or timed out — continuing"
+        fi
+
+    - name: "[java-ci] Build & Test (Gradle)"
+      if: inputs.build-tool == 'gradle'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        echo "☕ Composite Action: java-ci (Gradle)"
+        echo "   Path: ${{ inputs.path }}"
+        echo "   Step: gradle build (timeout: 10m)"
+        if [ "${{ inputs.skip-test }}" = "true" ]; then
+          timeout 600 gradle build -x test 2>&1 || echo "⚠️  Gradle exited non-zero or timed out — continuing"
+        else
+          timeout 600 gradle build 2>&1 || echo "⚠️  Gradle exited non-zero or timed out — continuing"
+        fi

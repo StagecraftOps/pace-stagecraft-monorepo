@@ -1,0 +1,25 @@
+﻿{
+  "name": "@zillow/profile-settings",
+  "version": "1.0.0",
+  "description": "User profile and settings",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.23.1",
+    "@zillow/shared-types": "*",
+    "@zillow/shared-utils": "*"
+  },
+  "devDependencies": {
+    "vite": "^5.2.11",
+    "@vitejs/plugin-react": "^4.2.1",
+    "typescript": "^5.4.5",
+    "@types/react": "^18.3.1",
+    "vitest": "^1.6.0"
+  }
+}

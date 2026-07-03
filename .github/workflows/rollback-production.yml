@@ -1,0 +1,161 @@
+name: "Rollback: Production Emergency"
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: "Service to roll back"
+        required: true
+        type: string
+      target_version:
+        description: "Target version/image tag to roll back to (e.g. v1.3.1)"
+        required: true
+        type: string
+      reason:
+        description: "Reason for rollback (required for audit trail)"
+        required: true
+        type: string
+
+concurrency:
+  group: rollback-production-${{ inputs.service_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate-rollback-target:
+    name: "Validate Rollback Target"
+    runs-on: ubuntu-latest
+    outputs:
+      image_exists: ${{ steps.check-image.outputs.exists }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Check image exists in ECR
+        id: check-image
+        run: |
+          IMAGE_TAG="${{ inputs.target_version }}"
+          REPO="${{ inputs.service_name }}"
+          EXISTS=$(aws ecr describe-images \
+            --repository-name "$REPO" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'length(imageDetails)' \
+            --output text 2>/dev/null || echo "0")
+          if [ "$EXISTS" = "0" ]; then
+            echo "ERROR: Image $REPO:$IMAGE_TAG does not exist in ECR"
+            exit 1
+          fi
+          echo "exists=true" >> $GITHUB_OUTPUT
+          echo "Image $REPO:$IMAGE_TAG found in ECR"
+
+  notify-oncall:
+    name: "Alert On-Call via PagerDuty"
+    needs: validate-rollback-target
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create PagerDuty incident
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Token token=${{ secrets.PAGERDUTY_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            "https://api.pagerduty.com/incidents" \
+            -d '{
+              "incident": {
+                "type": "incident",
+                "title": "Production Rollback Initiated: ${{ inputs.service_name }}",
+                "service": {"id": "${{ secrets.PAGERDUTY_SERVICE_ID }}", "type": "service_reference"},
+                "urgency": "high",
+                "body": {"type": "incident_body", "details": "Reason: ${{ inputs.reason }}\nTarget version: ${{ inputs.target_version }}\nTriggered by: ${{ github.actor }}"}
+              }
+            }'
+
+  perform-rollback:
+    name: "Execute Rollback"
+    needs: notify-oncall
+    environment: production
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: production
+      service_name: ${{ inputs.service_name }}
+      image_tag: ${{ inputs.target_version }}
+      cluster_name: "prod-eks-cluster"
+      namespace: "production"
+      replicas: 5
+      wait_for_rollout: true
+    secrets: inherit
+
+  verify-rollback:
+    name: "Verify Rollback Health"
+    needs: perform-rollback
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name prod-eks-cluster --region us-east-1
+
+      - name: Run smoke tests post-rollback
+        run: |
+          SERVICE="${{ inputs.service_name }}"
+          for i in {1..10}; do
+            POD=$(kubectl get pods -n production -l app="$SERVICE" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+            if [ -n "$POD" ]; then
+              READY=$(kubectl get pod "$POD" -n production -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
+              if [ "$READY" = "true" ]; then
+                echo "Service $SERVICE is healthy after rollback"
+                exit 0
+              fi
+            fi
+            echo "Attempt $i: service not ready, waiting 15s..."
+            sleep 15
+          done
+          echo "ERROR: Service $SERVICE not healthy after rollback"
+          exit 1
+
+  update-incident-ticket:
+    name: "Update Jira Incident Ticket"
+    needs: verify-rollback
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Jira incident ticket
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer ${{ secrets.JIRA_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            "https://zillow.atlassian.net/rest/api/3/issue" \
+            -d '{
+              "fields": {
+                "project": {"key": "OPS"},
+                "summary": "Production Rollback: ${{ inputs.service_name }} → ${{ inputs.target_version }}",
+                "description": {
+                  "type": "doc", "version": 1,
+                  "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Reason: ${{ inputs.reason }}\nRollback completed successfully by ${{ github.actor }}."}]}]
+                },
+                "issuetype": {"name": "Incident"},
+                "priority": {"name": "High"}
+              }
+            }'
+
+  post-rollback-report:
+    name: "Post Rollback Report"
+    needs: [verify-rollback, update-incident-ticket]
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service_name: ${{ inputs.service_name }}
+      environment: production
+      status: ROLLBACK
+      image_tag: ${{ inputs.target_version }}
+      deploy_url: "https://www.zillow.com"
+      triggered_by: ${{ github.actor }}
+    secrets: inherit

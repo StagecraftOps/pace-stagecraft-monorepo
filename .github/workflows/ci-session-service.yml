@@ -1,0 +1,158 @@
+name: "CI — session-service"
+
+on:
+  push:
+    paths:
+      - 'services/auth/session-service/**'
+      - 'packages/**'
+  pull_request:
+    paths:
+      - 'services/auth/session-service/**'
+      - 'packages/**'
+
+concurrency:
+  group: ci-session-service-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/auth/session-service
+  NODE_VERSION: '20'
+
+jobs:
+  lint:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: session-${{ hashFiles('services/auth/session-service/package-lock.json') }}
+          restore-keys: session-
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run lint
+
+      - name: Check formatting with Prettier
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run format:check
+
+  unit-test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: session-${{ hashFiles('services/auth/session-service/package-lock.json') }}
+          restore-keys: session-
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run unit tests with coverage
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          npm test -- \
+            --coverage \
+            --coverageThreshold='{"global":{"lines":85,"branches":80}}' \
+            --forceExit \
+            --ci
+        env:
+          REDIS_URL: redis://localhost:6379
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: session-coverage
+          path: ${{ env.SERVICE_DIR }}/coverage/
+          retention-days: 7
+
+  security-scan:
+    name: Security Scan
+    needs: lint
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: session-service
+      working_directory: services/auth/session-service
+      severity_threshold: HIGH
+    secrets: inherit
+
+  build:
+    name: Build
+    needs: [unit-test, security-scan]
+    uses: ./.github/workflows/_template-node-ci.yml
+    with:
+      service_name: session-service
+      node_version: '20'
+      working_directory: services/auth/session-service
+      run_e2e: false
+    secrets: inherit
+
+  docker-build:
+    name: Build Docker Image
+    needs: build
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: session-service
+      dockerfile_path: services/auth/session-service/Dockerfile
+      ecr_repository: stagecraft/session-service
+      image_tag: ${{ github.sha }}
+      push_image: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests — Session Lifecycle
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: session-service
+      test_suite: session-lifecycle
+      environment_url: http://localhost:8003
+      test_timeout_minutes: 15
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: session-service
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: auth
+      helm_chart_path: charts/session-service
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

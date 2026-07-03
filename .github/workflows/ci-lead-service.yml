@@ -1,0 +1,181 @@
+name: "CI — lead-service"
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "services/backend/lead-service/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/backend/lead-service/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-lead-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20"
+  SERVICE_DIR: services/backend/lead-service
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: services/backend/lead-service/package-lock.json
+
+      - name: Install dependencies
+        working-directory: services/backend/lead-service
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: services/backend/lead-service
+        run: npx eslint . --ext .js,.ts --format=github
+
+      - name: Run Prettier format check
+        working-directory: services/backend/lead-service
+        run: npx prettier --check "src/**/*.{ts,js,json}"
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: services/backend/lead-service/package-lock.json
+
+      - name: Install dependencies
+        working-directory: services/backend/lead-service
+        run: npm ci
+
+      - name: Run Jest with 85% line coverage threshold
+        working-directory: services/backend/lead-service
+        run: |
+          npx jest --coverage \
+            --coverageThreshold='{"global":{"lines":85}}' \
+            --coverageReporters=text,lcov \
+            --forceExit
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lead-service-coverage
+          path: services/backend/lead-service/coverage/
+
+  security-scan:
+    needs: lint
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: lead-service
+      working_directory: services/backend/lead-service
+      severity_threshold: HIGH
+    secrets: inherit
+
+  build:
+    needs: [unit-test, security-scan]
+    uses: ./.github/workflows/_template-node-ci.yml
+    with:
+      service_name: lead-service
+      node_version: "20"
+      working_directory: services/backend/lead-service
+      run_e2e: false
+    secrets: inherit
+
+  docker-build:
+    needs: build
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: lead-service
+      dockerfile_path: services/backend/lead-service/Dockerfile
+      ecr_repository: stagecraft/lead-service
+      image_tag: ${{ github.sha }}
+      push_image: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  integration-test:
+    runs-on: ubuntu-latest
+    needs: docker-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Start CRM mock server
+        run: |
+          docker-compose \
+            -f services/backend/lead-service/docker-compose.mock.yml \
+            up -d --wait
+
+      - name: Run lead routing integration tests
+        uses: ./.github/workflows/_template-integration-test.yml
+        with:
+          service_name: lead-service
+          test_suite: lead-routing
+          environment_url: http://localhost:8019
+          test_timeout_minutes: 20
+
+      - name: Tear down mock CRM server
+        if: always()
+        run: |
+          docker-compose \
+            -f services/backend/lead-service/docker-compose.mock.yml \
+            down
+
+  load-test:
+    runs-on: ubuntu-latest
+    needs: integration-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install k6
+        run: npm install -g k6
+
+      - name: Run lead ingestion load test (50 VUs, 2 minutes)
+        run: |
+          k6 run \
+            --vus 50 \
+            --duration 2m \
+            --summary-export=lead-k6-summary.json \
+            services/backend/lead-service/tests/perf/lead-ingestion.js
+
+      - name: Assert p99 latency under 500ms
+        run: |
+          P99=$(jq '.metrics.http_req_duration.values["p(99)"]' lead-k6-summary.json)
+          echo "p99 latency: ${P99}ms"
+          awk "BEGIN{if ($P99 > 500) {print \"FAIL: p99 \" $P99 \"ms exceeds 500ms threshold\"; exit 1}}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lead-service-load-test
+          path: lead-k6-summary.json
+
+  deploy-staging:
+    needs: [integration-test, load-test]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: lead-service
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: backend
+      helm_chart_path: charts/lead-service
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

@@ -1,0 +1,128 @@
+name: "Template: Integration Tests"
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      test_suite:
+        required: false
+        type: string
+        default: "integration"
+      environment_url:
+        required: false
+        type: string
+        default: "http://localhost:8080"
+      test_timeout_minutes:
+        required: false
+        type: number
+        default: 30
+    secrets:
+      TEST_DB_URL:
+        required: false
+      TEST_REDIS_URL:
+        required: false
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+
+jobs:
+  integration-test:
+    name: "Integration Tests — ${{ inputs.service_name }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.test_timeout_minutes }}
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: testdb
+          POSTGRES_USER: testuser
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Start service dependencies with Docker Compose
+        run: |
+          if [ -f "services/${{ inputs.service_name }}/docker-compose.test.yml" ]; then
+            docker compose -f services/${{ inputs.service_name }}/docker-compose.test.yml up -d --wait
+          fi
+
+      - name: Wait for services to be ready
+        run: |
+          timeout 60 bash -c 'until curl -sf ${{ inputs.environment_url }}/health; do sleep 2; done' || true
+
+      - name: Run integration test suite
+        run: |
+          if [ -f "services/${{ inputs.service_name }}/pytest.ini" ] || [ -f "services/${{ inputs.service_name }}/pyproject.toml" ]; then
+            cd services/${{ inputs.service_name }}
+            pytest tests/${{ inputs.test_suite }}/ \
+              --junitxml=integration-results.xml \
+              --html=integration-report.html \
+              --self-contained-html \
+              -v \
+              --timeout=120 \
+              -m "integration"
+          elif [ -f "services/${{ inputs.service_name }}/package.json" ]; then
+            cd services/${{ inputs.service_name }}
+            npm run test:integration -- --reporter=junit --outputFile=integration-results.xml
+          elif [ -f "services/${{ inputs.service_name }}/go.mod" ]; then
+            cd services/${{ inputs.service_name }}
+            go test -v -tags=integration -timeout=20m ./... 2>&1 | tee integration-results.txt
+          fi
+        env:
+          DATABASE_URL: postgresql://testuser:testpassword@localhost:5432/testdb
+          REDIS_URL: redis://localhost:6379
+          ENVIRONMENT_URL: ${{ inputs.environment_url }}
+          CI: true
+
+      - name: Generate HTML test report
+        if: always()
+        run: |
+          echo "Integration tests completed for ${{ inputs.service_name }}" >> integration-summary.txt
+
+      - name: Upload integration test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ inputs.service_name }}-integration-results-${{ github.sha }}
+          path: |
+            services/${{ inputs.service_name }}/integration-results.xml
+            services/${{ inputs.service_name }}/integration-report.html
+          retention-days: 14
+
+      - name: Teardown Docker Compose services
+        if: always()
+        run: |
+          if [ -f "services/${{ inputs.service_name }}/docker-compose.test.yml" ]; then
+            docker compose -f services/${{ inputs.service_name }}/docker-compose.test.yml down -v
+          fi
+
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: services/${{ inputs.service_name }}/integration-results.xml
+          check_name: "Integration Tests — ${{ inputs.service_name }}"
+          comment_mode: off

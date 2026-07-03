@@ -1,0 +1,57 @@
+﻿# =============================================================================
+# CD SERVICE GROUP  .  Reusable Child Workflow
+# =============================================================================
+#
+#  Called by cd-orchestrator.yml -- once per service group.
+#  Runs a matrix deploy job (one entry per service in the group).
+#
+#  STAGE
+#  -----
+#    deploy  -> echo deployment info (placeholder for real deploy logic)
+#
+# =============================================================================
+
+name: "CD - Service Group (Child)"
+
+on:
+  workflow_call:
+    inputs:
+      group:
+        required: true
+        type: string
+        description: "Service group folder (e.g. backend)"
+      services:
+        required: true
+        type: string
+        description: "JSON array of service names"
+      environment:
+        required: true
+        type: string
+        description: "production | staging | preview"
+      sha:
+        required: true
+        type: string
+        description: "Git commit SHA being deployed"
+
+# -----------------------------------------------------------------------------
+jobs:
+
+  # ===========================================================================
+  # STAGE 1 . DEPLOY  (parallel per service)
+  # ===========================================================================
+  deploy:
+    name: "Deploy . ${{ inputs.group }}/${{ matrix.service }} -> ${{ inputs.environment }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJson(inputs.services) }}
+
+    steps:
+      - name: Deploy service
+        run: |
+          echo "group       : ${{ inputs.group }}"
+          echo "service     : ${{ matrix.service }}"
+          echo "environment : ${{ inputs.environment }}"
+          echo "sha         : ${{ inputs.sha }}"
+          echo "Deploy placeholder - add real deploy logic here"

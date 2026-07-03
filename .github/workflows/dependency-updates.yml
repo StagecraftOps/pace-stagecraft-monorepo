@@ -1,0 +1,239 @@
+name: "Automated Dependency Updates"
+
+on:
+  schedule:
+    - cron: '0 6 * * 1,3,5'  # Mon/Wed/Fri 6am UTC
+  workflow_dispatch:
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  check-node-updates:
+    name: Check Node.js Dependency Updates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install npm-check-updates
+        run: npm install -g npm-check-updates
+
+      - name: Check updates for all Node services
+        run: |
+          for dir in \
+            services/auth/oauth-service \
+            services/auth/session-service \
+            services/backend/listing-service \
+            services/frontend/zillow-web \
+            services/frontend/search-ui; do
+            if [ -d "$dir" ] && [ -f "$dir/package.json" ]; then
+              service=$(basename "$dir")
+              echo "Checking $service..."
+              cd "$dir"
+              ncu --jsonUpgraded > /tmp/updates-${service}.json 2>/dev/null || echo '{}' > /tmp/updates-${service}.json
+              UPDATES=$(cat /tmp/updates-${service}.json)
+              echo "$service updates: $UPDATES"
+              cd "$GITHUB_WORKSPACE"
+            fi
+          done
+
+      - name: Upload NCU results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ncu-results
+          path: /tmp/updates-*.json
+          retention-days: 7
+
+  check-python-updates:
+    name: Check Python Dependency Updates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install audit tools
+        run: pip install pip-audit safety
+
+      - name: Audit Python services
+        run: |
+          for dir in $(find services -name "requirements.txt" -exec dirname {} \;); do
+            service=$(basename "$dir")
+            echo "Auditing $service..."
+            pip-audit --requirement "$dir/requirements.txt" --format json \
+              > /tmp/audit-${service}.json 2>&1 || true
+            safety check -r "$dir/requirements.txt" --json \
+              > /tmp/safety-${service}.json 2>&1 || true
+          done
+
+      - name: Upload Python audit results
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-audit-results
+          path: /tmp/audit-*.json
+          retention-days: 7
+
+  check-go-updates:
+    name: Check Go Dependency Updates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Check Go module updates
+        run: |
+          for dir in $(find services -name "go.mod" -exec dirname {} \;); do
+            service=$(basename "$dir")
+            echo "Checking Go updates for $service..."
+            cd "$dir"
+            go list -u -m all 2>/dev/null | grep '\[' > /tmp/go-updates-${service}.txt || true
+            echo "Updates for $service:"
+            cat /tmp/go-updates-${service}.txt || echo "(none)"
+            cd "$GITHUB_WORKSPACE"
+          done
+
+      - name: Upload Go update results
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-update-results
+          path: /tmp/go-updates-*.txt
+          retention-days: 7
+
+  check-docker-base-images:
+    name: Check Docker Base Image Updates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Parse Dockerfiles and check for image updates
+        run: |
+          python3 - <<'EOF'
+          import subprocess, re, json, os, glob
+
+          dockerfiles = glob.glob('services/**/Dockerfile', recursive=True)
+          results = []
+
+          for df in dockerfiles:
+            with open(df) as f:
+              content = f.read()
+            from_lines = re.findall(r'^FROM\s+(\S+)', content, re.MULTILINE)
+            for image in from_lines:
+              if image.startswith('$') or image.lower() == 'scratch':
+                continue
+              try:
+                pull = subprocess.run(['docker', 'pull', image],
+                  capture_output=True, text=True, timeout=60)
+                digest_out = subprocess.run(
+                  ['docker', 'inspect', '--format={{index .RepoDigests 0}}', image],
+                  capture_output=True, text=True)
+                digest = digest_out.stdout.strip()
+                results.append({'dockerfile': df, 'image': image, 'digest': digest, 'updated': pull.returncode == 0})
+              except Exception as e:
+                results.append({'dockerfile': df, 'image': image, 'error': str(e)})
+
+          with open('/tmp/docker-image-updates.json', 'w') as out:
+            json.dump(results, out, indent=2)
+          print(f"Checked {len(results)} base images.")
+          for r in results:
+            print(f"  {r['image']} in {r['dockerfile']}: {r.get('digest','unknown')}")
+          EOF
+
+      - name: Upload Docker image update results
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-updates
+          path: /tmp/docker-image-updates.json
+          retention-days: 7
+
+  create-update-prs:
+    name: Create Dependency Update PRs
+    runs-on: ubuntu-latest
+    needs: [check-node-updates, check-python-updates, check-go-updates, check-docker-base-images]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Download all update artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: update-artifacts/
+
+      - name: Configure git identity
+        run: |
+          git config user.name "deps-bot[bot]"
+          git config user.email "deps-bot@users.noreply.github.com"
+
+      - name: Create dependency update PRs
+        run: |
+          pip install PyGithub
+          python scripts/create-dependency-prs.py \
+            --artifacts-dir update-artifacts/ \
+            --repo "$GITHUB_REPOSITORY" \
+            --base-branch main \
+            --token "${{ secrets.GITHUB_TOKEN }}" \
+            || python3 - <<'PYEOF'
+          # Fallback: report what would be updated
+          import json, glob, os
+          print("Dependency update summary (dry run — create-dependency-prs.py not found):")
+          for f in glob.glob('update-artifacts/**/*.json', recursive=True):
+            try:
+              with open(f) as fp:
+                data = json.load(fp)
+              if data:
+                print(f"  {f}: {len(data) if isinstance(data, dict) else 'has updates'}")
+            except Exception as e:
+              print(f"  {f}: could not parse ({e})")
+          PYEOF
+
+  notify-team:
+    name: Notify Team
+    needs: create-update-prs
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service_name: deps-bot
+      environment: all
+      status: ${{ needs.create-update-prs.result }}
+      triggered_by: scheduler
+    secrets: inherit

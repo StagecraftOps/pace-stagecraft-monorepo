@@ -1,0 +1,193 @@
+name: CI - Push Notification Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/notification/push-notification-service/**"
+      - ".github/workflows/ci-push-notification-service.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/notification/push-notification-service/**"
+      - ".github/workflows/ci-push-notification-service.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/notification/push-notification-service
+  NODE_VERSION: "20"
+  IMAGE_NAME: push-notification-service
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: services/notification/push-notification-service/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run lint
+
+      - name: Run Prettier check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run format:check
+
+      - name: Run TypeScript type check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run type-check
+
+  unit-test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: services/notification/push-notification-service/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run Jest unit tests with 83% coverage
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          NODE_ENV: test
+          FCM_PROJECT_ID: mock-project-id
+          APNS_TEAM_ID: mock-team-id
+        run: |
+          npm run test:unit -- \
+            --coverage \
+            --coverageThreshold='{"global":{"lines":83,"branches":78}}' \
+            --ci
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: push-notification-coverage
+          path: ${{ env.SERVICE_DIR }}/coverage/
+
+  fcm-apns-credential-check:
+    name: FCM and APNs Credential Presence Check
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify FCM service account key secret is present
+        run: |
+          if [ -z "${{ secrets.FCM_SERVICE_ACCOUNT_KEY }}" ]; then
+            echo "ERROR: FCM_SERVICE_ACCOUNT_KEY secret is not set"
+            exit 1
+          fi
+          echo "FCM_SERVICE_ACCOUNT_KEY secret is present (value not logged)"
+
+      - name: Verify APNs certificate secret is present
+        run: |
+          if [ -z "${{ secrets.APNS_CERTIFICATE_P8 }}" ]; then
+            echo "ERROR: APNS_CERTIFICATE_P8 secret is not set"
+            exit 1
+          fi
+          echo "APNS_CERTIFICATE_P8 secret is present (value not logged)"
+
+      - name: Verify APNs key ID secret is present
+        run: |
+          if [ -z "${{ secrets.APNS_KEY_ID }}" ]; then
+            echo "ERROR: APNS_KEY_ID secret is not set"
+            exit 1
+          fi
+          echo "APNS_KEY_ID secret is present (value not logged)"
+
+      - name: Verify APNs team ID secret is present
+        run: |
+          if [ -z "${{ secrets.APNS_TEAM_ID }}" ]; then
+            echo "ERROR: APNS_TEAM_ID secret is not set"
+            exit 1
+          fi
+          echo "APNS_TEAM_ID secret is present (value not logged)"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: services/notification/push-notification-service/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Validate FCM service account JSON structure
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          FCM_SERVICE_ACCOUNT_JSON: ${{ secrets.FCM_SERVICE_ACCOUNT_KEY }}
+        run: node scripts/validate-fcm-credential-structure.js
+
+      - name: Validate APNs p8 key file format
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          APNS_CERT_CONTENT: ${{ secrets.APNS_CERTIFICATE_P8 }}
+        run: node scripts/validate-apns-credential-format.js
+
+  docker-build:
+    name: Docker Build
+    needs: fcm-apns-credential-check
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_dir: services/notification/push-notification-service
+      image_name: push-notification-service
+      dockerfile: services/notification/push-notification-service/Dockerfile
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_dir: services/notification/push-notification-service
+      node_version: "20"
+      test_path: tests/integration/
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: push-notification-service
+      namespace: notification
+      image_tag: ${{ github.sha }}
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [deploy-staging, integration-test]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      workflow_name: "Push Notification Service CI"
+      service_name: push-notification-service
+      environment: staging
+    secrets: inherit

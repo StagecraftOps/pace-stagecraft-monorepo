@@ -1,0 +1,161 @@
+name: "CI — token-service"
+
+on:
+  push:
+    paths:
+      - 'services/auth/token-service/**'
+      - 'packages/**'
+  pull_request:
+    paths:
+      - 'services/auth/token-service/**'
+      - 'packages/**'
+
+concurrency:
+  group: ci-token-service-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/auth/token-service
+  GO_VERSION: '1.22'
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: token-${{ hashFiles('services/auth/token-service/go.sum') }}
+          restore-keys: token-go-
+
+      - name: Download Go modules
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go mod download
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: ${{ env.SERVICE_DIR }}
+          args: --timeout=5m --enable=gosec,govet,errcheck ./...
+
+  unit-test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: token-${{ hashFiles('services/auth/token-service/go.sum') }}
+          restore-keys: token-go-
+
+      - name: Run tests with race detector and coverage
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          go test \
+            -race \
+            -count=1 \
+            -coverprofile=coverage.out \
+            -covermode=atomic \
+            -timeout 5m \
+            ./...
+
+      - name: Assert coverage threshold (>82%)
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          TOTAL=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}' | tr -d '%')
+          echo "Total coverage: ${TOTAL}%"
+          if (( $(echo "$TOTAL < 82" | bc -l) )); then
+            echo "::error::Coverage ${TOTAL}% is below required 82%"
+            exit 1
+          fi
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: token-coverage
+          path: ${{ env.SERVICE_DIR }}/coverage.out
+          retention-days: 7
+
+  build:
+    name: Build
+    needs: unit-test
+    uses: ./.github/workflows/_template-go-ci.yml
+    with:
+      service_name: token-service
+      go_version: '1.22'
+      working_directory: services/auth/token-service
+    secrets: inherit
+
+  security-scan:
+    name: Security Scan
+    needs: lint
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: token-service
+      working_directory: services/auth/token-service
+      severity_threshold: HIGH
+    secrets: inherit
+
+  docker-build:
+    name: Build Docker Image
+    needs: [build, security-scan]
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: token-service
+      dockerfile_path: services/auth/token-service/Dockerfile
+      ecr_repository: stagecraft/token-service
+      image_tag: ${{ github.sha }}
+      push_image: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests — Token Lifecycle
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: token-service
+      test_suite: token-lifecycle
+      environment_url: http://localhost:9002
+      test_timeout_minutes: 12
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: token-service
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: auth
+      helm_chart_path: charts/token-service
+      replicas: 3
+      wait_for_rollout: true
+    secrets: inherit

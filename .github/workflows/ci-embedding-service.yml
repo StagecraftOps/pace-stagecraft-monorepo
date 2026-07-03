@@ -1,0 +1,158 @@
+name: "CI — embedding-service"
+
+on:
+  push:
+    paths:
+      - "services/ml/embedding-service/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/ml/embedding-service/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-embedding-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: embedding-service-${{ hashFiles('services/ml/embedding-service/requirements*.txt') }}
+          restore-keys: embedding-service-
+      - name: Install package with dev extras
+        run: pip install -e ".[dev]"
+        working-directory: services/ml/embedding-service
+      - name: Lint with ruff
+        run: ruff check . --output-format=github
+        working-directory: services/ml/embedding-service
+      - name: Type check with mypy
+        run: mypy src/ --ignore-missing-imports
+        working-directory: services/ml/embedding-service
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: [lint-typecheck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: embedding-service-${{ hashFiles('services/ml/embedding-service/requirements*.txt') }}
+          restore-keys: embedding-service-
+      - name: Install package with dev extras
+        run: pip install -e ".[dev]"
+        working-directory: services/ml/embedding-service
+      - name: Run unit tests with coverage
+        run: pytest tests/unit/ -v --cov=src --cov-report=xml --cov-fail-under=83
+        working-directory: services/ml/embedding-service
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedding-service-coverage
+          path: services/ml/embedding-service/coverage.xml
+
+  model-benchmark:
+    runs-on: ubuntu-latest
+    needs: [lint-typecheck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: embedding-service-${{ hashFiles('services/ml/embedding-service/requirements*.txt') }}
+          restore-keys: embedding-service-
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-1
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+      - name: Install ML extras
+        run: pip install -e ".[dev]" torch sentence-transformers
+        working-directory: services/ml/embedding-service
+      - name: Benchmark text and image embeddings (latency thresholds)
+        run: >
+          python scripts/benchmark_embeddings.py
+          --text-model sentence-transformers/all-mpnet-base-v2
+          --image-model clip-vit-base-patch32
+          --n-samples 100
+        working-directory: services/ml/embedding-service
+      - name: Check embedding quality (cosine similarity thresholds)
+        run: python scripts/check_embedding_quality.py
+        working-directory: services/ml/embedding-service
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedding-benchmark-results
+          path: services/ml/embedding-service/benchmark_results.json
+
+  security-scan:
+    needs: [lint-typecheck]
+    uses: ./.github/workflows/_template-security-scan.yml
+    with:
+      service_name: embedding-service
+      working_directory: services/ml/embedding-service
+      severity_threshold: MEDIUM
+    secrets: inherit
+
+  build:
+    needs: [unit-test, model-benchmark]
+    uses: ./.github/workflows/_template-python-ci.yml
+    with:
+      service_name: embedding-service
+      python_version: "3.11"
+      working_directory: services/ml/embedding-service
+      run_integration: false
+    secrets: inherit
+
+  docker-build:
+    needs: [unit-test, model-benchmark]
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service_name: embedding-service
+      dockerfile_path: services/ml/embedding-service/Dockerfile
+      ecr_repository: stagecraft/embedding-service
+      image_tag: ${{ github.sha }}
+      push_image: true
+    secrets: inherit
+
+  integration-test:
+    needs: [docker-build]
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service_name: embedding-service
+      test_suite: embeddings
+      environment_url: https://staging-embeddings.internal
+      test_timeout_minutes: 20
+    secrets: inherit
+
+  deploy-staging:
+    needs: [integration-test]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: embedding-service
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: ml
+      helm_chart_path: charts/embedding-service
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

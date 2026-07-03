@@ -1,0 +1,192 @@
+name: CI - Subscription Service
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/payment/subscription-service/**"
+      - ".github/workflows/ci-subscription-service.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/payment/subscription-service/**"
+      - ".github/workflows/ci-subscription-service.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/payment/subscription-service
+  NODE_VERSION: "20"
+  COVERAGE_THRESHOLD: "85"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run lint -- --max-warnings 0
+
+      - name: Run Prettier check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run format:check
+
+      - name: Run TypeScript type check
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm run typecheck
+
+  unit-test:
+    name: Unit Tests (Jest, 85% coverage)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run Jest unit tests with coverage
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          npm run test -- \
+            --coverage \
+            --coverageThreshold='{"global":{"lines":${{ env.COVERAGE_THRESHOLD }}}}' \
+            --testPathPattern=tests/unit \
+            --reporters=default \
+            --reporters=jest-junit
+        env:
+          JEST_JUNIT_OUTPUT_DIR: ./test-results
+          JEST_JUNIT_OUTPUT_NAME: unit-results.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: ${{ env.SERVICE_DIR }}/test-results/unit-results.xml
+
+  billing-logic-test:
+    name: Billing Logic Tests (proration, upgrade/downgrade)
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: npm ci
+
+      - name: Run proration calculation tests
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          npm run test:billing -- \
+            --testPathPattern=tests/billing \
+            --forceExit \
+            --verbose
+        env:
+          TEST_BILLING_MODE: "strict"
+          STRIPE_TEST_CLOCK_ENABLED: "true"
+
+      - name: Run plan upgrade scenario tests
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          npm run test:billing:upgrade -- \
+            --forceExit \
+            --verbose
+        env:
+          PLAN_TEST_SCENARIOS: "premier-agent,enhanced,standard"
+
+      - name: Run plan downgrade scenario tests
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          npm run test:billing:downgrade -- \
+            --forceExit \
+            --verbose
+
+      - name: Validate trial period edge cases
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: node scripts/validate-trial-billing.js --edge-cases-file tests/fixtures/trial-scenarios.json
+
+      - name: Check invoice line-item accuracy
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: node scripts/validate-invoice-items.js --tolerance-cents 1
+
+  docker-build:
+    name: Docker Build
+    needs: billing-logic-test
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service-name: subscription-service
+      dockerfile-path: services/payment/subscription-service/Dockerfile
+      context-path: services/payment/subscription-service
+      image-tag: ${{ github.sha }}
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service-name: subscription-service
+      service-dir: services/payment/subscription-service
+      compose-file: services/payment/subscription-service/docker-compose.test.yml
+      test-command: "npm run test:integration"
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: integration-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      service-name: subscription-service
+      environment: staging
+      image-tag: ${{ github.sha }}
+      namespace: payments-staging
+      helm-values-file: services/payment/subscription-service/helm/values-staging.yaml
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [lint, unit-test, billing-logic-test, docker-build, integration-test, deploy-staging]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service-name: subscription-service
+      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      channel: "#payments-ci"
+    secrets: inherit

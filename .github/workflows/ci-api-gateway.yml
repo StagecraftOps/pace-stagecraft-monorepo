@@ -1,0 +1,215 @@
+name: CI - API Gateway
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "services/infra/api-gateway/**"
+      - ".github/workflows/ci-api-gateway.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "services/infra/api-gateway/**"
+      - ".github/workflows/ci-api-gateway.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  SERVICE_DIR: services/infra/api-gateway
+  GO_VERSION: "1.22"
+  COVERAGE_THRESHOLD: "85"
+  RATE_LIMIT_RPS: "100"
+
+jobs:
+  lint:
+    name: Lint (golangci-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/go.sum
+
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | \
+            sh -s -- -b $(go env GOPATH)/bin v1.57.2
+
+      - name: Run golangci-lint
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: golangci-lint run --timeout 5m ./...
+
+      - name: Run go vet
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go vet ./...
+
+      - name: Run staticcheck
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+
+  unit-test:
+    name: Unit Tests (go test, 85% coverage)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/go.sum
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('services/infra/api-gateway/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Run unit tests with coverage
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          go test -coverprofile=coverage.out -covermode=atomic ./...
+          go tool cover -func=coverage.out | grep total | awk '{print $3}' | \
+            awk -F'%' '{if ($1 < ${{ env.COVERAGE_THRESHOLD }}) {print "Coverage "$1"% below threshold ${{ env.COVERAGE_THRESHOLD }}%"; exit 1} else {print "Coverage "$1"% OK"}}'
+
+      - name: Generate coverage report
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go tool cover -html=coverage.out -o coverage.html
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: ${{ env.SERVICE_DIR }}/coverage.html
+
+  rate-limit-test:
+    name: Rate Limiting Tests (headers, 429 behavior under load)
+    runs-on: ubuntu-latest
+    needs: unit-test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/go.sum
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('services/infra/api-gateway/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install load testing tools
+        run: go install github.com/tsenart/vegeta@latest
+
+      - name: Start gateway in test mode
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          go build -o gateway-test ./cmd/gateway/main.go
+          ./gateway-test --config config/test.yml --port 8080 &
+          sleep 3
+        env:
+          RATE_LIMIT_ENABLED: "true"
+          RATE_LIMIT_RPS: ${{ env.RATE_LIMIT_RPS }}
+
+      - name: Validate rate limit response headers
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          go test -v -run TestRateLimitHeaders ./tests/ratelimit/... \
+            -args -gateway-url=http://localhost:8080
+
+      - name: Test 429 response under burst load
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          go test -v -run TestBurst429Response ./tests/ratelimit/... \
+            -args -rps=${{ env.RATE_LIMIT_RPS }} \
+                  -burst-multiplier=3 \
+                  -gateway-url=http://localhost:8080
+
+      - name: Validate Retry-After header on 429
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go test -v -run TestRetryAfterHeader ./tests/ratelimit/...
+
+      - name: Test per-client rate limit isolation
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go test -v -run TestPerClientIsolation ./tests/ratelimit/...
+
+      - name: Validate auth middleware headers
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: go test -v -run TestAuthMiddleware ./tests/middleware/...
+
+  docker-build:
+    name: Docker Build
+    needs: rate-limit-test
+    uses: ./.github/workflows/_template-docker-build.yml
+    with:
+      service-name: api-gateway
+      dockerfile-path: services/infra/api-gateway/Dockerfile
+      context-path: services/infra/api-gateway
+      image-tag: ${{ github.sha }}
+    secrets: inherit
+
+  integration-test:
+    name: Integration Tests
+    needs: docker-build
+    uses: ./.github/workflows/_template-integration-test.yml
+    with:
+      service-name: api-gateway
+      service-dir: services/infra/api-gateway
+      compose-file: services/infra/api-gateway/docker-compose.test.yml
+      test-command: "go test -v -timeout 300s ./tests/integration/..."
+    secrets: inherit
+
+  e2e-test:
+    name: End-to-End Tests
+    needs: integration-test
+    uses: ./.github/workflows/_template-e2e-test.yml
+    with:
+      service-name: api-gateway
+      service-dir: services/infra/api-gateway
+      compose-file: services/infra/api-gateway/docker-compose.e2e.yml
+      test-command: "go test -v -timeout 600s ./tests/e2e/..."
+      environment: test
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to Staging
+    needs: e2e-test
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      service-name: api-gateway
+      environment: staging
+      image-tag: ${{ github.sha }}
+      namespace: infra-staging
+      helm-values-file: services/infra/api-gateway/helm/values-staging.yaml
+    secrets: inherit
+
+  notify:
+    name: Notify Slack
+    needs: [lint, unit-test, rate-limit-test, docker-build, integration-test, e2e-test, deploy-staging]
+    if: always()
+    uses: ./.github/workflows/_template-notify-slack.yml
+    with:
+      service-name: api-gateway
+      workflow-status: ${{ contains(needs.*.result, 'failure') && 'failure' || 'success' }}
+      channel: "#infra-ci"
+    secrets: inherit

@@ -1,0 +1,152 @@
+name: "CI — map-explorer"
+
+on:
+  push:
+    paths:
+      - "services/frontend/map-explorer/**"
+      - "packages/**"
+  pull_request:
+    paths:
+      - "services/frontend/map-explorer/**"
+      - "packages/**"
+
+concurrency:
+  group: ci-map-explorer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-map-explorer-${{ hashFiles('services/frontend/map-explorer/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-map-explorer-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/map-explorer
+      - name: Lint (ESLint)
+        run: npm run lint
+        working-directory: services/frontend/map-explorer
+      - name: Format check (Prettier)
+        run: npm run format:check
+        working-directory: services/frontend/map-explorer
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-map-explorer-${{ hashFiles('services/frontend/map-explorer/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-map-explorer-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/map-explorer
+      - name: TypeScript type check
+        run: npm run type-check
+        working-directory: services/frontend/map-explorer
+
+  unit-test:
+    runs-on: ubuntu-latest
+    needs: [lint, type-check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-map-explorer-${{ hashFiles('services/frontend/map-explorer/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-map-explorer-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/map-explorer
+      - name: Run unit tests (map layers, clusters, polygons, heatmaps)
+        run: >
+          npm test -- --ci --coverage
+          --coverageThreshold='{"global":{"lines":78}}'
+          --testPathPattern='(layer|cluster|polygon|heatmap)'
+        working-directory: services/frontend/map-explorer
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: map-explorer-coverage
+          path: services/frontend/map-explorer/coverage/
+
+  perf-test:
+    runs-on: ubuntu-latest
+    needs: [unit-test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-map-explorer-${{ hashFiles('services/frontend/map-explorer/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-node-map-explorer-
+      - name: Install dependencies
+        run: npm ci
+        working-directory: services/frontend/map-explorer
+      - name: Build
+        run: npm run build
+        working-directory: services/frontend/map-explorer
+      - name: Map render benchmark (10K pins < 100ms via jsdom)
+        run: node scripts/map-render-benchmark.js --tiles 10000 --timeout 100
+        working-directory: services/frontend/map-explorer
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: map-explorer-bench
+          path: services/frontend/map-explorer/benchmark-results.json
+
+  build:
+    needs: [unit-test, perf-test]
+    uses: ./.github/workflows/_template-node-ci.yml
+    with:
+      service_name: map-explorer
+      node_version: "20"
+      working_directory: services/frontend/map-explorer
+      run_e2e: false
+    secrets: inherit
+
+  e2e-test:
+    needs: [build]
+    uses: ./.github/workflows/_template-e2e-test.yml
+    with:
+      service_name: map-explorer
+      base_url: https://staging-map.internal
+      browser_list: chromium
+      test_grep_pattern: "draw|polygon|cluster|heatmap"
+    secrets: inherit
+
+  deploy-staging:
+    needs: [e2e-test]
+    if: github.ref == 'refs/heads/develop'
+    uses: ./.github/workflows/_template-deploy-k8s.yml
+    with:
+      environment: staging
+      service_name: map-explorer
+      image_tag: ${{ github.sha }}
+      cluster_name: staging-eks
+      namespace: frontend
+      helm_chart_path: charts/map-explorer
+      replicas: 2
+      wait_for_rollout: true
+    secrets: inherit

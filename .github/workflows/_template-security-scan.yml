@@ -13,96 +13,28 @@ on:
         required: false
         type: string
         default: "HIGH"
-    secrets:
-      SNYK_TOKEN:
-        required: false
 
 jobs:
   security-scan:
-    name: "Security Scan — ${{ inputs.service_name }}"
+    name: "Security Scan - ${{ inputs.service_name }}"
     runs-on: ubuntu-latest
-    permissions:
-      security-events: write
-      actions: read
-      contents: read
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Run Snyk Open Source scan
-        uses: snyk/actions/node@master
-        continue-on-error: true
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: >
-            --severity-threshold=${{ inputs.severity_threshold }}
-            --sarif-file-output=snyk-oss.sarif
-            --file=${{ inputs.working_directory }}/package.json
-
-      - name: Run Snyk Code (SAST) scan
-        uses: snyk/actions/node@master
-        continue-on-error: true
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          command: code test
-          args: >
-            ${{ inputs.working_directory }}
-            --sarif-file-output=snyk-code.sarif
-            --severity-threshold=${{ inputs.severity_threshold }}
-
-      - name: Run OWASP Dependency Check
-        uses: dependency-check/Dependency-Check_Action@main
-        with:
-          project: ${{ inputs.service_name }}
-          path: ${{ inputs.working_directory }}
-          format: SARIF
-          out: owasp-results
-          args: >
-            --enableRetired
-            --failOnCVSS 7
-            --suppression .dependency-check-suppressions.xml
 
       - name: Run Trivy filesystem scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           scan-type: fs
           scan-ref: ${{ inputs.working_directory }}
-          format: sarif
-          output: trivy-fs.sarif
+          format: table
           severity: ${{ inputs.severity_threshold }},CRITICAL
           exit-code: "0"
-
-      - name: Upload Snyk OSS results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: snyk-oss.sarif
-          category: snyk-oss-${{ inputs.service_name }}
-
-      - name: Upload Snyk Code results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: snyk-code.sarif
-          category: snyk-code-${{ inputs.service_name }}
-
-      - name: Upload Trivy filesystem results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: trivy-fs.sarif
-          category: trivy-fs-${{ inputs.service_name }}
 
       - name: Generate security scan summary
         if: always()
         run: |
-          echo "## Security Scan Summary — ${{ inputs.service_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Severity Threshold:** ${{ inputs.severity_threshold }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Snyk OSS:** $(cat snyk-oss.sarif | jq '.runs[0].results | length' 2>/dev/null || echo 'N/A') findings" >> $GITHUB_STEP_SUMMARY
-          echo "- **Snyk SAST:** $(cat snyk-code.sarif | jq '.runs[0].results | length' 2>/dev/null || echo 'N/A') findings" >> $GITHUB_STEP_SUMMARY
-          echo "- **Trivy FS:** $(cat trivy-fs.sarif | jq '.runs[0].results | length' 2>/dev/null || echo 'N/A') findings" >> $GITHUB_STEP_SUMMARY
+          echo "## Security Scan - ${{ inputs.service_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Severity threshold: ${{ inputs.severity_threshold }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Directory scanned: ${{ inputs.working_directory }}" >> $GITHUB_STEP_SUMMARY

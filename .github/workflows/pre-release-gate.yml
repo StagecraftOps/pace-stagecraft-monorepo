@@ -124,7 +124,6 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   security-posture:
     name: "Security Posture Check"
-    runs-on: ubuntu-latest
     needs: aggregate-ci-status
     if: needs.aggregate-ci-status.outputs.all_pass == 'true'
     uses: ./.github/workflows/_template-security-scan.yml
@@ -139,7 +138,6 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────────
   cross-service-smoke:
     name: "Cross-Service Smoke Tests"
-    runs-on: ubuntu-latest
     needs: aggregate-ci-status
     if: needs.aggregate-ci-status.outputs.all_pass == 'true'
     uses: ./.github/workflows/_template-integration-test.yml

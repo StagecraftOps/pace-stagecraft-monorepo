@@ -39,7 +39,7 @@ jobs:
       - name: Download Go modules
         run: cd services/backend/offer-service && go mod download
 
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v9
         with:
           working-directory: services/backend/offer-service
           args: --timeout 5m --config ../../.golangci.yml

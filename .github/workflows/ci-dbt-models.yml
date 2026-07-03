@@ -11,6 +11,7 @@ on:
     paths:
       - "services/data/dbt-models/**"
       - ".github/workflows/ci-dbt-models.yml"
+
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true

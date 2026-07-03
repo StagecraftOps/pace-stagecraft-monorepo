@@ -11,6 +11,7 @@ on:
     paths:
       - "services/data/data-quality-pipeline/**"
       - ".github/workflows/ci-data-quality-pipeline.yml"
+
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true

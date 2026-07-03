@@ -11,6 +11,7 @@ on:
     paths:
       - "services/data/data-warehouse-service/**"
       - ".github/workflows/ci-data-warehouse-service.yml"
+
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true

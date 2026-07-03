@@ -11,6 +11,7 @@ on:
     paths:
       - "services/data/mls-ingestion/**"
       - ".github/workflows/ci-mls-ingestion.yml"
+
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true

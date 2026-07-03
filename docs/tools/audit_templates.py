@@ -19,6 +19,10 @@ WDIR = Path(__file__).resolve().parent.parent.parent / ".github" / "workflows"
 
 yaml = YAML()
 yaml.preserve_quotes = True
+# IMPORTANT: keep this indent config when using ruamel.yaml to WRITE workflow files.
+# Without it, sequence items ('- ') are placed at the same column as the parent key,
+# which GitHub Actions rejects with startup_failure even though it is valid YAML.
+yaml.indent(mapping=2, sequence=4, offset=2)
 
 
 def load_template_inputs(tpl_path: Path):

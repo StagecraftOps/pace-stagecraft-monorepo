@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@zillow/mortgage-service",
   "version": "1.0.0",
   "description": "Mortgage calculator and rates",
@@ -20,7 +20,7 @@
   },
   "devDependencies": {
     "@nestjs/cli": "^10.3.2",
-    "typescript": "^5.4.5",
+    "typescript": "^6.0.3",
     "@types/node": "^20.12.7"
   }
 }

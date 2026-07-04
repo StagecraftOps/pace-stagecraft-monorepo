@@ -1,0 +1,20 @@
+name: Stagecraft Remediation Test
+
+# A deliberately-broken workflow used to validate Stagecraft's AI remediation
+# end to end: the python-version below is invalid, so this fails, Stagecraft
+# analyzes it and opens a fix PR bumping it to a valid version.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/stagecraft-remediation-test.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.99"
+      - run: python --version

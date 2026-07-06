@@ -29,7 +29,7 @@ jobs:
       env_ready: ${{ steps.verify.outputs.env_ready }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -67,10 +67,10 @@ jobs:
     needs: setup-perf-env
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js for k6 install
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
 
@@ -87,7 +87,7 @@ jobs:
         run: k6 run --vus 50 --duration 3m --out json=results-user.json tests/perf/user-api.js
 
       - name: Upload baseline results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: baseline-load-results
           path: results-*.json
@@ -99,7 +99,7 @@ jobs:
     needs: baseline-api-load-test
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install k6
         run: wget -q https://github.com/grafana/k6/releases/latest/download/k6-linux-amd64.tar.gz && tar -xzf k6-linux-amd64.tar.gz && sudo mv k6-*/k6 /usr/local/bin/
@@ -125,7 +125,7 @@ jobs:
           echo "p95 latency within acceptable range."
 
       - name: Upload peak results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: peak-load-results
           path: results-peak.json
@@ -137,10 +137,10 @@ jobs:
     needs: setup-perf-env
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -159,7 +159,7 @@ jobs:
             -f tests/perf/zestimate_locust.py
 
       - name: Upload Locust CSV results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zestimate-stress-results
           path: locust-zestimate*.csv
@@ -171,7 +171,7 @@ jobs:
     needs: setup-perf-env
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -207,7 +207,7 @@ jobs:
           cat db-benchmark-report.txt
 
       - name: Upload DB benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: db-benchmark-results
           path: |
@@ -244,15 +244,15 @@ jobs:
     if: always()
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
       - name: Download all result artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: perf-results/
 

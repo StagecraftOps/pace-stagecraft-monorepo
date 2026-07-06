@@ -76,7 +76,7 @@ jobs:
     if: inputs.chaos_type == 'network-latency' || inputs.chaos_type == 'all' || github.event_name == 'schedule'
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -214,7 +214,7 @@ jobs:
       resilience_passed: ${{ steps.analyze.outputs.resilience_passed }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -224,7 +224,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -275,7 +275,7 @@ jobs:
           EOF
 
       - name: Upload resilience report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: resilience-report
           path: resilience-report.json
@@ -288,7 +288,7 @@ jobs:
     if: always()
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -334,15 +334,15 @@ jobs:
     if: always()
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
       - name: Download resilience report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: resilience-report
           path: ./
@@ -363,7 +363,7 @@ jobs:
           EOF
 
       - name: Upload HTML chaos report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: chaos-html-report
           path: chaos-report.html

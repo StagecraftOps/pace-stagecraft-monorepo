@@ -23,9 +23,9 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -47,9 +47,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -67,7 +67,7 @@ jobs:
             --coverageReporters=text,lcov \
             --forceExit
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lead-service-coverage
           path: services/backend/lead-service/coverage/
@@ -106,9 +106,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: docker-build
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -137,9 +137,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: integration-test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -160,7 +160,7 @@ jobs:
           echo "p99 latency: ${P99}ms"
           awk "BEGIN{if ($P99 > 500) {print \"FAIL: p99 \" $P99 \"ms exceeds 500ms threshold\"; exit 1}}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lead-service-load-test
           path: lead-k6-summary.json

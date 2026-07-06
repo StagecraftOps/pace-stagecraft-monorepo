@@ -23,13 +23,13 @@ jobs:
   lint-typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: transaction-${{ hashFiles('services/backend/transaction-service/requirements*.txt') }}
@@ -52,13 +52,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint-typecheck
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: transaction-${{ hashFiles('services/backend/transaction-service/requirements*.txt') }}
@@ -80,7 +80,7 @@ jobs:
             -x \
             -k "not integration"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: transaction-service-coverage
           path: |
@@ -91,13 +91,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: unit-test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: transaction-${{ hashFiles('services/backend/transaction-service/requirements*.txt') }}
@@ -120,7 +120,7 @@ jobs:
         working-directory: services/backend/transaction-service
         run: pytest tests/compliance/ -v --tb=long --junit-xml=compliance-results.xml
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: transaction-compliance-results
           path: services/backend/transaction-service/compliance-results.xml

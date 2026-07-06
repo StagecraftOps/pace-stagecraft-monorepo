@@ -18,12 +18,12 @@ jobs:
   lint-typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Cache pip
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: search-ranking-${{ hashFiles('services/ml/search-ranking-model/requirements*.txt') }}
@@ -42,12 +42,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [lint-typecheck]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Cache pip
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: search-ranking-${{ hashFiles('services/ml/search-ranking-model/requirements*.txt') }}
@@ -59,7 +59,7 @@ jobs:
         run: pytest tests/unit/ -v --cov=src --cov-report=xml --cov-fail-under=80
         working-directory: services/ml/search-ranking-model
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: search-ranking-coverage
           path: services/ml/search-ranking-model/coverage.xml
@@ -68,12 +68,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [lint-typecheck]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Cache pip
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: search-ranking-${{ hashFiles('services/ml/search-ranking-model/requirements*.txt') }}
@@ -88,7 +88,7 @@ jobs:
         run: python scripts/check_feature_coverage.py
         working-directory: services/ml/search-ranking-model
       - name: Upload feature coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: search-ranking-feature-coverage
           path: services/ml/search-ranking-model/feature-coverage-report.json
@@ -97,12 +97,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [unit-test, feature-pipeline-test]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Cache pip
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: search-ranking-${{ hashFiles('services/ml/search-ranking-model/requirements*.txt') }}
@@ -130,7 +130,7 @@ jobs:
           --min-mrr 0.55
         working-directory: services/ml/search-ranking-model
       - name: Upload offline metrics
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: search-ranking-offline-metrics
           path: services/ml/search-ranking-model/offline_metrics.json

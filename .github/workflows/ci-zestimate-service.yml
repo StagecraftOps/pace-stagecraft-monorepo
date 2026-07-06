@@ -23,13 +23,13 @@ jobs:
   lint-typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: zestimate-${{ hashFiles('services/backend/zestimate-service/requirements*.txt') }}
@@ -52,13 +52,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint-typecheck
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: zestimate-${{ hashFiles('services/backend/zestimate-service/requirements*.txt') }}
@@ -73,7 +73,7 @@ jobs:
         working-directory: services/backend/zestimate-service
         run: pytest tests/unit/ -v --cov=app --cov-report=xml --cov-report=html --cov-fail-under=87 -x
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: zestimate-service-coverage
           path: |
@@ -84,13 +84,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint-typecheck
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: zestimate-${{ hashFiles('services/backend/zestimate-service/requirements*.txt') }}
@@ -114,7 +114,7 @@ jobs:
             --test-fixtures tests/fixtures/zestimate_test_cases.json \
             --max-mape 5.0
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: zestimate-model-validation-report
           path: services/backend/zestimate-service/model_validation_report.json
@@ -153,9 +153,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: docker-build
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
 
@@ -170,7 +170,7 @@ jobs:
             --summary-export=zestimate-k6-summary.json \
             services/backend/zestimate-service/tests/perf/zestimate-load.js
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: zestimate-load-test-results
           path: zestimate-k6-summary.json

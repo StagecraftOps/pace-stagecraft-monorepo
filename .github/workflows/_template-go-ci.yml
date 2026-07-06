@@ -27,18 +27,18 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup Go ${{ inputs.go_version }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ inputs.go_version }}
           cache-dependency-path: ${{ inputs.working_directory }}/go.sum
 
       - name: Cache Go modules
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/go/pkg/mod
@@ -86,7 +86,7 @@ jobs:
             ./cmd/...
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.service_name }}-binary-${{ github.sha }}
           path: ${{ inputs.working_directory }}/bin/${{ inputs.service_name }}

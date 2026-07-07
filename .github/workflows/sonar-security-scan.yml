@@ -1,0 +1,33 @@
+name: SonarQube Security Scan
+
+# SonarQube/SonarCloud static analysis (SAST + code quality). To feed StageCraft's
+# Vulnerability RCA agent, configure the SonarCloud project to export findings to
+# GitHub code scanning (SARIF), or enable the SonarCloud GitHub app. Requires a
+# SONAR_TOKEN secret and (for SonarCloud) a sonar-project.properties file.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sonar:
+    name: SonarQube scan
+    runs-on: ubuntu-latest
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarQube scan
+        if: env.SONAR_TOKEN != ''
+        uses: SonarSource/sonarqube-scan-action@v3
+
+      - name: Sonar not configured
+        if: env.SONAR_TOKEN == ''
+        run: |
+          echo "SONAR_TOKEN is not set — skipping SonarQube scan."
+          echo "Add a SONAR_TOKEN secret and a sonar-project.properties file to enable,"
+          echo "then wire SonarCloud -> GitHub code scanning so findings reach StageCraft."

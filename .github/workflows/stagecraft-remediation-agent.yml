@@ -1,0 +1,42 @@
+name: StageCraft Remediation Agent
+
+# Deployed by StageCraft's Vulnerability Remediation agent. Runs Anthropic's
+# official claude-code-action against the brief StageCraft commits to
+# .stagecraft/BRIEF.md just before dispatching this workflow, and opens a
+# signed fix PR on a stagecraft/-prefixed branch. Auth uses an org-level AWS
+# Bedrock bearer token (see StagecraftOps org secret AWS_BEARER_TOKEN_BEDROCK)
+# -- a short-lived-key stopgap until this org has IAM access to set up
+# OIDC-based AWS role assumption instead.
+on:
+  workflow_dispatch:
+    inputs:
+      brief_path:
+        description: Path to the brief committed by StageCraft
+        required: false
+        default: .stagecraft/BRIEF.md
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  remediate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: anthropics/claude-code-action@v1
+        env:
+          AWS_REGION: us-east-1
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+        with:
+          use_bedrock: true
+          base_branch: main
+          branch_prefix: "stagecraft/"
+          use_commit_signing: true
+          prompt: |
+            Read ${{ github.event.inputs.brief_path }} in the repo root for the vulnerability
+            findings, dependency fix order, and application context. Fix the most
+            foundational issue first. Open a PR.
+          claude_args: |
+            --max-turns 15

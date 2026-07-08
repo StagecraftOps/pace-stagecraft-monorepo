@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@zillow/mortgage-service",
   "version": "1.0.0",
   "description": "Mortgage calculator and rates",
@@ -9,7 +9,7 @@
     "test": "jest"
   },
   "dependencies": {
-    "@nestjs/common": "^10.3.8",
+    "@nestjs/common": "^11.1.27",
     "@nestjs/core": "^10.3.8",
     "@nestjs/platform-fastify": "^10.3.8",
     "@nestjs/config": "^3.2.2",

@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@zillow/search-ui",
   "version": "1.0.0",
   "description": "Advanced property search UI",
@@ -6,7 +6,10 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "vitest"
+    "test": "vitest",
+    "lint": "echo 'no eslint config yet' && exit 0",
+    "format:check": "echo 'no prettier config yet' && exit 0",
+    "type-check": "tsc --noEmit"
   },
   "dependencies": {
     "react": "^18.3.1",

@@ -18,12 +18,12 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
       - name: Cache npm
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.npm
           key: ${{ runner.os }}-node-zillow-web-${{ hashFiles('services/frontend/zillow-web/package-lock.json') }}
@@ -44,12 +44,12 @@ jobs:
   type-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
       - name: Cache npm
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.npm
           key: ${{ runner.os }}-node-zillow-web-${{ hashFiles('services/frontend/zillow-web/package-lock.json') }}
@@ -65,12 +65,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [lint, type-check]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
       - name: Cache npm
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.npm
           key: ${{ runner.os }}-node-zillow-web-${{ hashFiles('services/frontend/zillow-web/package-lock.json') }}
@@ -88,12 +88,12 @@ jobs:
           JEST_JUNIT_OUTPUT_DIR: reports
           JEST_JUNIT_OUTPUT_NAME: jest-junit.xml
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zillow-web-coverage
           path: services/frontend/zillow-web/coverage/
       - name: Upload Jest JUnit report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zillow-web-jest-junit
           path: services/frontend/zillow-web/reports/jest-junit.xml
@@ -102,12 +102,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [lint]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
       - name: Cache npm
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.npm
           key: ${{ runner.os }}-node-zillow-web-${{ hashFiles('services/frontend/zillow-web/package-lock.json') }}
@@ -125,7 +125,7 @@ jobs:
           --exit-zero-on-error
           --output-dir services/frontend/zillow-web/a11y-results
       - name: Upload a11y results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zillow-web-a11y-results
           path: services/frontend/zillow-web/a11y-results/

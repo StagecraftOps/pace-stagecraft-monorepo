@@ -1,16 +1,16 @@
 # StageCraft Failure Brief -- StagecraftOps/pace-stagecraft-monorepo
 
-## Failed workflow: CI - Geocoder Service (.github/workflows/ci-geocoder-service.yml)
+## Failed workflow: CI - MLS Ingestion Service (.github/workflows/ci-mls-ingestion.yml)
 
 ## Root cause (from automated analysis)
 
-The file services/geo/geocoder-service/go.mod contains a UTF-8 BOM (byte-order mark, U+FEFF) at the very first byte. The Go toolchain explicitly rejects this: 'go.mod:1: unexpected input character '\ufeff''. When golangci-lint invokes go/packages to load the module graph, the Go parser fails with exit status 1, causing golangci-lint to exit with code 3 ('context loading failed'). This is a repository-content problem — the go.mod file itself was saved with a BOM, most likely by a Windows editor or IDE. The fix is to strip the BOM from go.mod (e.g. `sed -i '1s/^\xef\xbb\xbf//' go.mod`) and commit the corrected file.
+The `validate-schema` job fails at the 'Validate MLS feed schemas' step with exit code 2 because the script `services/data/mls-ingestion/scripts/validate_schemas.py` does not exist in the repository at the checked-out commit (06678b4). The runner reports: `python: can't open file '.../services/data/mls-ingestion/scripts/validate_schemas.py': [Errno 2] No such file or directory`. This means the `scripts/` directory (and specifically `validate_schemas.py`) is missing from the service's source tree. The workflow YAML correctly sets `working-directory: ${{ env.SERVICE_DIR }}` and references the script at a relative path that is structurally sound — the problem is purely that the file is absent from the repository content, not that the pipeline is misconfigured.
 
 ## Why this is a code-level issue, not a pipeline config issue
 
-The go.mod file in the service directory was committed with a UTF-8 BOM character, which is a repository-content defect that must be fixed by editing and recommitting the file, not by changing the workflow YAML.
+The pipeline YAML is correctly structured; the failure is caused by a missing application-level file (`scripts/validate_schemas.py`) that must be added to `services/data/mls-ingestion/scripts/` in the repository source tree.
 
-Failure category: LINT_ERROR
+Failure category: CONFIG_ERROR
 
 ## Application Context
 
@@ -21,62 +21,50 @@ Failure category: LINT_ERROR
 ## Relevant log excerpt
 
 ```
-26-07-20T16:28:42.2360560Z ##[group]Run case "failure" in
-2026-07-20T16:28:42.2361742Z [36;1mcase "failure" in[0m
-2026-07-20T16:28:42.2362799Z [36;1m  SUCCESS|success)[0m
-2026-07-20T16:28:42.2363933Z [36;1m    echo "emoji=✅" >> $GITHUB_OUTPUT[0m
-2026-07-20T16:28:42.2365317Z [36;1m    echo "color=#36a64f" >> $GITHUB_OUTPUT[0m
-2026-07-20T16:28:42.2366887Z [36;1m    ;;[0m
-2026-07-20T16:28:42.2367851Z [36;1m  FAILURE|failure|FAILED|failed)[0m
-2026-07-20T16:28:42.2369162Z [36;1m    echo "emoji=❌" >> $GITHUB_OUTPUT[0m
-2026-07-20T16:28:42.2370531Z [36;1m    echo "color=#ff0000" >> $GITHUB_OUTPUT[0m
-2026-07-20T16:28:42.2371793Z [36;1m    ;;[0m
-2026-07-20T16:28:42.2372688Z [36;1m  ROLLBACK|rollback)[0m
-2026-07-20T16:28:42.2373828Z [36;1m    echo "emoji=⏪" >> $GITHUB_OUTPUT[0m
-2026-07-20T16:28:42.2375202Z [36;1m    echo "color=#ff9900" >> $GITHUB_OUTPUT[0m
-2026-07-20T16:28:42.2376966Z [36;1m    ;;[0m
-2026-07-20T16:28:42.2377898Z [36;1m  IN_PROGRESS|in_progress)[0m
-2026-07-20T16:28:42.2379141Z [36;1m    echo "emoji=🔄" >> $GITHUB_OUTPUT[0m
-2026-07-20T16:28:42.2380598Z [36;1m    echo "color=#0066cc" >> $GITHUB_OUTPUT[0m
-2026-07-20T16:28:42.2381866Z [36;1m    ;;[0m
-2026-07-20T16:28:42.2382820Z [36;1m  AUDIT_COMPLETE|audit_complete)[0m
-2026-07-20T16:28:42.2384138Z [36;1m    echo "emoji=🔍" >> $GITHUB_OUTPUT[0m
-2026-07-20T16:28:42.2385529Z [36;1m    echo "color=#9933cc" >> $GITHUB_OUTPUT[0m
-2026-07-20T16:28:42.2387012Z [36;1m    ;;[0m
-2026-07-20T16:28:42.2387858Z [36;1m  *)[0m
-2026-07-20T16:28:42.2388801Z [36;1m    echo "emoji=ℹ️" >> $GITHUB_OUTPUT[0m
-2026-07-20T16:28:42.2390165Z [36;1m    echo "color=#cccccc" >> $GITHUB_OUTPUT[0m
-2026-07-20T16:28:42.2391433Z [36;1m    ;;[0m
-2026-07-20T16:28:42.2392287Z [36;1mesac[0m
-2026-07-20T16:28:42.2451353Z shell: /usr/bin/bash -e {0}
-2026-07-20T16:28:42.2452400Z ##[endgroup]
-﻿2026-07-20T16:28:42.2631453Z ##[group]Run if [ -n "$WEBHOOK" ]; then
-2026-07-20T16:28:42.2632753Z [36;1mif [ -n "$WEBHOOK" ]; then[0m
-2026-07-20T16:28:42.2634030Z [36;1m  echo "available=true" >> "$GITHUB_OUTPUT"[0m
-2026-07-20T16:28:42.2635314Z [36;1melse[0m
-2026-07-20T16:28:42.2636602Z [36;1m  echo "available=false" >> "$GITHUB_OUTPUT"[0m
-2026-07-20T16:28:42.2638556Z [36;1m  echo "::notice::SLACK_WEBHOOK_URL not configured — notification will be skipped"[0m
-2026-07-20T16:28:42.2640365Z [36;1mfi[0m
-2026-07-20T16:28:42.2701665Z shell: /usr/bin/bash -e {0}
-2026-07-20T16:28:42.2702696Z env:
-2026-07-20T16:28:42.2703470Z   WEBHOOK: 
-2026-07-20T16:28:42.2704266Z ##[endgroup]
-2026-07-20T16:28:42.2818251Z ##[notice]SLACK_WEBHOOK_URL not configured — notification will be skipped
-2026-07-20T16:28:33.3010000Z Requested labels: ubuntu-latest
-2026-07-20T16:28:33.3010000Z Job defined at: StagecraftOps/pace-stagecraft-monorepo/.github/workflows/_template-notify-slack.yml@refs/pull/36/merge
-2026-07-20T16:28:33.3010000Z Reusable workflow chain:
-2026-07-20T16:28:33.3010000Z StagecraftOps/pace-stagecraft-monorepo/.github/workflows/ci-geocoder-service.yml@refs/pull/36/merge (06678b4deceda863c9791dcf1b4ee2d7706bbd8e)
-2026-07-20T16:28:33.3010000Z -> StagecraftOps/pace-stagecraft-monorepo/.github/workflows/_template-notify-slack.yml@refs/pull/36/merge (06678b4deceda863c9791dcf1b4ee2d7706bbd8e)
-2026-07-20T16:28:33.3010000Z Waiting for a runner to pick up this job...
-2026-07-20T16:28:33.2980000Z Evaluating notify.if
-2026-07-20T16:28:33.2980000Z Evaluating: always()
-2026-07-20T16:28:33.2980000Z Result: true
-2026-07-20T16:28:33.2980000Z Evaluating notify.notify-slack.if
-2026-07-20T16:28:33.2980000Z Evaluating: success()
-2026-07-20T16:28:33.2980000Z Result: true
-2026-07-20T16:28:33.6900000Z All GitHub-hosted runners with label [ubuntu-latest] are busy. For more information, see https://gh.io/job-concurrency-limits
-2026-07-20T16:28:36.9550000Z Job is waiting for a hosted runner to come online.
-2026-07-20T16:28:36.9550000Z Job is about to start running on the hosted runner: GitHub Actions 1000001924
+s-26.1.0-py3-none-any.whl.metadata (8.8 kB)
+2026-07-20T16:28:34.5792640Z Collecting jsonschema-specifications>=2023.03.6 (from jsonschema)
+2026-07-20T16:28:34.5871890Z   Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl.metadata (2.9 kB)
+2026-07-20T16:28:34.6097337Z Collecting referencing>=0.28.4 (from jsonschema)
+2026-07-20T16:28:34.6189342Z   Downloading referencing-0.37.0-py3-none-any.whl.metadata (2.8 kB)
+2026-07-20T16:28:34.8677229Z Collecting rpds-py>=0.25.0 (from jsonschema)
+2026-07-20T16:28:34.8758728Z   Downloading rpds_py-2026.6.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.1 kB)
+2026-07-20T16:28:34.8988415Z Collecting typing-extensions>=4.4.0 (from referencing>=0.28.4->jsonschema)
+2026-07-20T16:28:34.9066802Z   Downloading typing_extensions-4.16.0-py3-none-any.whl.metadata (3.3 kB)
+2026-07-20T16:28:34.9189552Z Downloading jsonschema-4.26.0-py3-none-any.whl (90 kB)
+2026-07-20T16:28:34.9395904Z Downloading pyyaml-6.0.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (806 kB)
+2026-07-20T16:28:34.9916450Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 806.6/806.6 kB 16.6 MB/s  0:00:00
+2026-07-20T16:28:34.9995585Z Downloading attrs-26.1.0-py3-none-any.whl (67 kB)
+2026-07-20T16:28:35.0112096Z Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl (18 kB)
+2026-07-20T16:28:35.0208495Z Downloading referencing-0.37.0-py3-none-any.whl (26 kB)
+2026-07-20T16:28:35.0305495Z Downloading rpds_py-2026.6.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (371 kB)
+2026-07-20T16:28:35.0571802Z Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
+2026-07-20T16:28:35.0872902Z Installing collected packages: typing-extensions, rpds-py, pyyaml, attrs, referencing, jsonschema-specifications, jsonschema
+2026-07-20T16:28:35.3166227Z 
+2026-07-20T16:28:35.3178021Z Successfully installed attrs-26.1.0 jsonschema-4.26.0 jsonschema-specifications-2025.9.1 pyyaml-6.0.3 referencing-0.37.0 rpds-py-2026.6.3 typing-extensions-4.16.0
+﻿2026-07-20T16:28:35.3904861Z ##[group]Run python scripts/validate_schemas.py --schema-dir schemas/
+2026-07-20T16:28:35.3905463Z [36;1mpython scripts/validate_schemas.py --schema-dir schemas/[0m
+2026-07-20T16:28:35.3975046Z shell: /usr/bin/bash -e {0}
+2026-07-20T16:28:35.3975342Z env:
+2026-07-20T16:28:35.3975605Z   SERVICE_DIR: services/data/mls-ingestion
+2026-07-20T16:28:35.3975905Z   PYTHON_VERSION: 3.11
+2026-07-20T16:28:35.3976171Z   IMAGE_NAME: mls-ingestion
+2026-07-20T16:28:35.3976501Z   pythonLocation: /opt/hostedtoolcache/Python/3.11.15/x64
+2026-07-20T16:28:35.3976934Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.11.15/x64/lib/pkgconfig
+2026-07-20T16:28:35.3977360Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.15/x64
+2026-07-20T16:28:35.3977767Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.15/x64
+2026-07-20T16:28:35.3978157Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.15/x64
+2026-07-20T16:28:35.3978532Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.11.15/x64/lib
+2026-07-20T16:28:35.3978861Z ##[endgroup]
+2026-07-20T16:28:35.4174507Z python: can't open file '/home/runner/work/pace-stagecraft-monorepo/pace-stagecraft-monorepo/services/data/mls-ingestion/scripts/validate_schemas.py': [Errno 2] No such file or directory
+2026-07-20T16:28:35.4209757Z ##[error]Process completed with exit code 2.
+2026-07-20T16:28:19.8790000Z Evaluating validate-schema.if
+2026-07-20T16:28:19.8790000Z Evaluating: success()
+2026-07-20T16:28:19.8790000Z Result: true
+2026-07-20T16:28:19.8860000Z Requested labels: ubuntu-latest
+2026-07-20T16:28:19.8860000Z Job defined at: StagecraftOps/pace-stagecraft-monorepo/.github/workflows/ci-mls-ingestion.yml@refs/pull/36/merge
+2026-07-20T16:28:19.8860000Z Waiting for a runner to pick up this job...
+2026-07-20T16:28:29.5650000Z Job is about to start running on the hosted runner: GitHub Actions 1000001913
+2026-07-20T16:28:29.5650000Z Job is waiting for a hosted runner to come online.
 ```
 
 ## Instructions

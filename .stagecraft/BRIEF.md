@@ -1,16 +1,16 @@
 # StageCraft Failure Brief -- StagecraftOps/pace-stagecraft-monorepo
 
-## Failed workflow: CI - Price Alert Service (.github/workflows/ci-price-alert-service.yml)
+## Failed workflow: PR — Validation (.github/workflows/pr-validation.yml)
 
 ## Root cause (from automated analysis)
 
-The `mypy src/` step in the lint job fails with exit code 2 and the message 'There are no .py[i] files in directory src'. The `src/` directory under `services/notification/price-alert-service/` contains no Python source files (confirmed by `black` also reporting 'No Python files are present'). This means the application source code is entirely absent from the checked-out tree for this PR — either the `src/` directory was never created or all `.py` files were accidentally removed/not committed.
+The `lint-shared` job fails because `actions/setup-node@v7` with `cache: "npm"` cannot find a dependency lock file (package-lock.json, npm-shrinkwrap.json, or yarn.lock) at the repository root. The error is: 'Dependencies lock file is not found in /home/runner/work/pace-stagecraft-monorepo/pace-stagecraft-monorepo.' This prevents the job from completing, which in turn causes the `pr-gate` required status check to fail.
 
 ## Why this is a code-level issue, not a pipeline config issue
 
-The failure is caused by missing application source files (no `.py` files in `src/`), which requires adding or restoring Python source code to the repository, not changing the workflow YAML.
+The repository root is missing a committed npm lock file (package-lock.json or equivalent), which is a repository content problem that must be fixed by running `npm install` and committing the resulting lock file, not by editing the workflow YAML.
 
-Failure category: LINT_ERROR
+Failure category: UNKNOWN
 
 ## Application Context
 
@@ -21,62 +21,62 @@ Failure category: LINT_ERROR
 ## Relevant log excerpt
 
 ```
-07-27T16:27:32.0388542Z ##[group]Run case "success" in
-2026-07-27T16:27:32.0389879Z [36;1mcase "success" in[0m
-2026-07-27T16:27:32.0391227Z [36;1m  SUCCESS|success)[0m
-2026-07-27T16:27:32.0392516Z [36;1m    echo "emoji=✅" >> $GITHUB_OUTPUT[0m
-2026-07-27T16:27:32.0393922Z [36;1m    echo "color=#36a64f" >> $GITHUB_OUTPUT[0m
-2026-07-27T16:27:32.0395253Z [36;1m    ;;[0m
-2026-07-27T16:27:32.0396302Z [36;1m  FAILURE|failure|FAILED|failed)[0m
-2026-07-27T16:27:32.0397630Z [36;1m    echo "emoji=❌" >> $GITHUB_OUTPUT[0m
-2026-07-27T16:27:32.0399031Z [36;1m    echo "color=#ff0000" >> $GITHUB_OUTPUT[0m
-2026-07-27T16:27:32.0400348Z [36;1m    ;;[0m
-2026-07-27T16:27:32.0401458Z [36;1m  ROLLBACK|rollback)[0m
-2026-07-27T16:27:32.0402677Z [36;1m    echo "emoji=⏪" >> $GITHUB_OUTPUT[0m
-2026-07-27T16:27:32.0404031Z [36;1m    echo "color=#ff9900" >> $GITHUB_OUTPUT[0m
-2026-07-27T16:27:32.0405577Z [36;1m    ;;[0m
-2026-07-27T16:27:32.0406618Z [36;1m  IN_PROGRESS|in_progress)[0m
-2026-07-27T16:27:32.0407886Z [36;1m    echo "emoji=🔄" >> $GITHUB_OUTPUT[0m
-2026-07-27T16:27:32.0409406Z [36;1m    echo "color=#0066cc" >> $GITHUB_OUTPUT[0m
-2026-07-27T16:27:32.0410687Z [36;1m    ;;[0m
-2026-07-27T16:27:32.0411967Z [36;1m  AUDIT_COMPLETE|audit_complete)[0m
-2026-07-27T16:27:32.0413328Z [36;1m    echo "emoji=🔍" >> $GITHUB_OUTPUT[0m
-2026-07-27T16:27:32.0414748Z [36;1m    echo "color=#9933cc" >> $GITHUB_OUTPUT[0m
-2026-07-27T16:27:32.0416012Z [36;1m    ;;[0m
-2026-07-27T16:27:32.0416974Z [36;1m  *)[0m
-2026-07-27T16:27:32.0418065Z [36;1m    echo "emoji=ℹ️" >> $GITHUB_OUTPUT[0m
-2026-07-27T16:27:32.0419440Z [36;1m    echo "color=#cccccc" >> $GITHUB_OUTPUT[0m
-2026-07-27T16:27:32.0420704Z [36;1m    ;;[0m
-2026-07-27T16:27:32.0421867Z [36;1mesac[0m
-2026-07-27T16:27:32.0454612Z shell: /usr/bin/bash -e {0}
-2026-07-27T16:27:32.0455795Z ##[endgroup]
-﻿2026-07-27T16:27:32.0630195Z ##[group]Run if [ -n "$WEBHOOK" ]; then
-2026-07-27T16:27:32.0631830Z [36;1mif [ -n "$WEBHOOK" ]; then[0m
-2026-07-27T16:27:32.0633271Z [36;1m  echo "available=true" >> "$GITHUB_OUTPUT"[0m
-2026-07-27T16:27:32.0634574Z [36;1melse[0m
-2026-07-27T16:27:32.0635695Z [36;1m  echo "available=false" >> "$GITHUB_OUTPUT"[0m
-2026-07-27T16:27:32.0637589Z [36;1m  echo "::notice::SLACK_WEBHOOK_URL not configured — notification will be skipped"[0m
-2026-07-27T16:27:32.0639462Z [36;1mfi[0m
-2026-07-27T16:27:32.0671599Z shell: /usr/bin/bash -e {0}
-2026-07-27T16:27:32.0673045Z env:
-2026-07-27T16:27:32.0673972Z   WEBHOOK: 
-2026-07-27T16:27:32.0674929Z ##[endgroup]
-2026-07-27T16:27:32.0762585Z ##[notice]SLACK_WEBHOOK_URL not configured — notification will be skipped
-2026-07-27T16:27:21.2520000Z Evaluating notify.if
-2026-07-27T16:27:21.2520000Z Evaluating: always()
-2026-07-27T16:27:21.2520000Z Result: true
-2026-07-27T16:27:21.2520000Z Evaluating notify.notify-slack.if
-2026-07-27T16:27:21.2520000Z Evaluating: success()
-2026-07-27T16:27:21.2520000Z Result: true
-2026-07-27T16:27:21.4560000Z Requested labels: ubuntu-latest
-2026-07-27T16:27:21.4560000Z Job defined at: StagecraftOps/pace-stagecraft-monorepo/.github/workflows/_template-notify-slack.yml@refs/pull/36/merge
-2026-07-27T16:27:21.4560000Z Reusable workflow chain:
-2026-07-27T16:27:21.4560000Z StagecraftOps/pace-stagecraft-monorepo/.github/workflows/ci-price-alert-service.yml@refs/pull/36/merge (0a1264bb06c5166e8711d59940d0eabe89d17ce2)
-2026-07-27T16:27:21.4560000Z -> StagecraftOps/pace-stagecraft-monorepo/.github/workflows/_template-notify-slack.yml@refs/pull/36/merge (0a1264bb06c5166e8711d59940d0eabe89d17ce2)
-2026-07-27T16:27:21.4560000Z Waiting for a runner to pick up this job...
-2026-07-27T16:27:21.5250000Z All GitHub-hosted runners with label [ubuntu-latest] are busy. For more information, see https://gh.io/job-concurrency-limits
-2026-07-27T16:27:27.8870000Z Job is waiting for a hosted runner to come online.
-2026-07-27T16:27:27.8880000Z Job is about to start running on the hosted runner: GitHub Actions 1000002093
+sr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-07-27T16:27:23.4996154Z ##[group]Checking out the ref
+2026-07-27T16:27:23.4997892Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/36/merge
+2026-07-27T16:27:23.5351871Z Note: switching to 'refs/remotes/pull/36/merge'.
+2026-07-27T16:27:23.5352494Z 
+2026-07-27T16:27:23.5352784Z You are in 'detached HEAD' state. You can look around, make experimental
+2026-07-27T16:27:23.5354081Z changes and commit them, and you can discard any commits you make in this
+2026-07-27T16:27:23.5354866Z state without impacting any branches by switching back to a branch.
+2026-07-27T16:27:23.5362211Z 
+2026-07-27T16:27:23.5363208Z If you want to create a new branch to retain commits you create, you may
+2026-07-27T16:27:23.5363891Z do so (now or later) by using -c with the switch command. Example:
+2026-07-27T16:27:23.5364296Z 
+2026-07-27T16:27:23.5364734Z   git switch -c <new-branch-name>
+2026-07-27T16:27:23.5365087Z 
+2026-07-27T16:27:23.5365493Z Or undo this operation with:
+2026-07-27T16:27:23.5365724Z 
+2026-07-27T16:27:23.5365936Z   git switch -
+2026-07-27T16:27:23.5366162Z 
+2026-07-27T16:27:23.5366402Z Turn off this advice by setting config variable advice.detachedHead to false
+2026-07-27T16:27:23.5366746Z 
+2026-07-27T16:27:23.5367055Z HEAD is now at 0a1264b Merge f6c7b25958cf37e7060ebdb8c7676796b9e6ff0d into 46d340685b0c99494c98c26afcd3ea69d7313357
+2026-07-27T16:27:23.5368453Z ##[endgroup]
+2026-07-27T16:27:23.5394193Z [command]/usr/bin/git log -1 --format=%H
+2026-07-27T16:27:23.5415141Z 0a1264bb06c5166e8711d59940d0eabe89d17ce2
+﻿2026-07-27T16:27:23.5669223Z ##[group]Run actions/setup-node@v7
+2026-07-27T16:27:23.5669550Z with:
+2026-07-27T16:27:23.5669828Z   node-version: 20
+2026-07-27T16:27:23.5670085Z   cache: npm
+2026-07-27T16:27:23.5670319Z   check-latest: false
+2026-07-27T16:27:23.5672381Z   [SECRET_REDACTED]
+2026-07-27T16:27:23.5672673Z   package-manager-cache: true
+2026-07-27T16:27:23.5672988Z env:
+2026-07-27T16:27:23.5673228Z   NODE_VERSION: 20
+2026-07-27T16:27:23.5673462Z ##[endgroup]
+2026-07-27T16:27:23.6716797Z Attempting to download 20...
+2026-07-27T16:27:24.6366418Z Acquiring 20.20.2 - x64 from https://github.com/actions/node-versions/releases/download/20.20.2-23521894959/node-20.20.2-linux-x64.tar.gz
+2026-07-27T16:27:25.1657732Z Extracting ...
+2026-07-27T16:27:25.1745943Z [command]/usr/bin/tar xz --strip 1 --warning=no-unknown-keyword --overwrite -C /home/runner/work/_temp/10eadc68-7721-4f92-a77f-3d88480245b6 -f /home/runner/work/_temp/27bb2e2b-159d-4c3b-8a73-4539b6633629
+2026-07-27T16:27:26.1020756Z Adding to the cache ...
+2026-07-27T16:27:27.7337290Z ##[group]Environment details
+2026-07-27T16:27:27.9113516Z node: v20.20.2
+2026-07-27T16:27:27.9113898Z npm: 10.8.2
+2026-07-27T16:27:27.9114226Z yarn: 1.22.22
+2026-07-27T16:27:27.9115004Z ##[endgroup]
+2026-07-27T16:27:27.9128175Z [command]/opt/hostedtoolcache/node/20.20.2/x64/bin/npm config get cache
+2026-07-27T16:27:27.9971835Z /home/runner/.npm
+2026-07-27T16:27:28.0058318Z ##[error]Dependencies lock file is not found in /home/runner/work/pace-stagecraft-monorepo/pace-stagecraft-monorepo. Supported file patterns: package-lock.json,npm-shrinkwrap.json,yarn.lock
+2026-07-27T16:27:01.0020000Z Evaluating lint-shared.if
+2026-07-27T16:27:01.0020000Z Evaluating: success()
+2026-07-27T16:27:01.0020000Z Result: true
+2026-07-27T16:27:01.0040000Z Requested labels: ubuntu-latest
+2026-07-27T16:27:01.0040000Z Job defined at: StagecraftOps/pace-stagecraft-monorepo/.github/workflows/pr-validation.yml@refs/pull/36/merge
+2026-07-27T16:27:01.0040000Z Waiting for a runner to pick up this job...
+2026-07-27T16:27:01.4330000Z All GitHub-hosted runners with label [ubuntu-latest] are busy. For more information, see https://gh.io/job-concurrency-limits
+2026-07-27T16:27:11.5300000Z Job is waiting for a hosted runner to come online.
+2026-07-27T16:27:11.5300000Z Job is about to start running on the hosted runner: GitHub Actions 1000002074
 ```
 
 ## Instructions

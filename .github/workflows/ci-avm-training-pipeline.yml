@@ -27,15 +27,15 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Cache pip dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('services/data/avm-training-pipeline/requirements*.txt') }}
@@ -62,15 +62,15 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Cache pip dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('services/data/avm-training-pipeline/requirements*.txt') }}
@@ -95,7 +95,7 @@ jobs:
             -v --tb=short
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: avm-coverage
           path: ${{ env.SERVICE_DIR }}/coverage.xml
@@ -105,10 +105,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: unit-test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -136,15 +136,15 @@ jobs:
     runs-on: ubuntu-latest
     needs: data-validation
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Cache pip dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('services/data/avm-training-pipeline/requirements*.txt') }}
@@ -181,7 +181,7 @@ jobs:
             --recursive
 
       - name: Upload model artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: avm-model-artifact
           path: /tmp/model_artifacts/
@@ -191,15 +191,15 @@ jobs:
     runs-on: ubuntu-latest
     needs: model-training
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Download model artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: avm-model-artifact
           path: /tmp/model_artifacts/

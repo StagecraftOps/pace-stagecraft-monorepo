@@ -33,18 +33,18 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup Node.js ${{ inputs.node_version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node_version }}
           registry-url: "https://registry.npmjs.org"
 
       - name: Cache npm dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ${{ inputs.working_directory }}/node_modules
@@ -84,7 +84,7 @@ jobs:
           NODE_ENV: production
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ inputs.service_name }}-build-${{ github.sha }}
           path: ${{ inputs.working_directory }}/dist

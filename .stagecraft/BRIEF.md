@@ -1,16 +1,16 @@
 # StageCraft Failure Brief -- StagecraftOps/pace-stagecraft-monorepo
 
-## Failed workflow: CI - MLS Ingestion Service (.github/workflows/ci-mls-ingestion.yml)
+## Failed workflow: CI - Notification Service (.github/workflows/ci-notification-service.yml)
 
 ## Root cause (from automated analysis)
 
-The validate-schema job fails at the 'Validate MLS feed schemas' step with exit code 2 because the script file 'services/data/mls-ingestion/scripts/validate_schemas.py' does not exist in the repository. Python's interpreter reports: "can't open file '…/services/data/mls-ingestion/scripts/validate_schemas.py': [Errno 2] No such file or directory". The scripts/ directory (or at minimum validate_schemas.py within it) was never committed to the repository, so the workflow cannot execute it regardless of how the pipeline is configured.
+The `actions/setup-node@v7` step in the `lint` job (and identically in `unit-test`) fails with `Some specified paths were not resolved, unable to cache dependencies` because `services/notification/notification-service/package-lock.json` does not exist in the repository. The workflow's `cache-dependency-path` correctly points to that file, but the file itself is missing from the repo — no `package-lock.json` (and likely no `package.json` either) has been committed under `services/notification/notification-service/`. This blocks the entire pipeline: `lint` fails immediately, `unit-test`/`integration-test`/`docker-build` never run.
 
 ## Why this is a code-level issue, not a pipeline config issue
 
-The failure is caused by a missing source file (scripts/validate_schemas.py) that must be created and committed under services/data/mls-ingestion/scripts/ — no change to the workflow YAML will resolve this.
+The missing `package-lock.json` (and likely the entire npm project scaffold) under `services/notification/notification-service/` must be added to the repository — this is a missing repository content problem, not a workflow YAML misconfiguration.
 
-Failure category: CONFIG_ERROR
+Failure category: UNKNOWN
 
 ## Application Context
 
@@ -21,51 +21,64 @@ Failure category: CONFIG_ERROR
 ## Relevant log excerpt
 
 ```
-fications-2025.9.1-py3-none-any.whl.metadata (2.9 kB)
-2026-08-03T16:28:48.2997791Z Collecting referencing>=0.28.4 (from jsonschema)
-2026-08-03T16:28:48.3067950Z   Downloading referencing-0.37.0-py3-none-any.whl.metadata (2.8 kB)
-2026-08-03T16:28:48.5704158Z Collecting rpds-py>=0.25.0 (from jsonschema)
-2026-08-03T16:28:48.5777664Z   Downloading rpds_py-2026.6.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.1 kB)
-2026-08-03T16:28:48.6004135Z Collecting typing-extensions>=4.4.0 (from referencing>=0.28.4->jsonschema)
-2026-08-03T16:28:48.6073501Z   Downloading typing_extensions-4.16.0-py3-none-any.whl.metadata (3.3 kB)
-2026-08-03T16:28:48.6184383Z Downloading jsonschema-4.26.0-py3-none-any.whl (90 kB)
-2026-08-03T16:28:48.6366630Z Downloading pyyaml-6.0.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (806 kB)
-2026-08-03T16:28:48.6636537Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 806.6/806.6 kB 39.0 MB/s  0:00:00
-2026-08-03T16:28:48.6708397Z Downloading attrs-26.1.0-py3-none-any.whl (67 kB)
-2026-08-03T16:28:48.6807995Z Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl (18 kB)
-2026-08-03T16:28:48.6899143Z Downloading referencing-0.37.0-py3-none-any.whl (26 kB)
-2026-08-03T16:28:48.6992270Z Downloading rpds_py-2026.6.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (371 kB)
-2026-08-03T16:28:48.7094165Z Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
-2026-08-03T16:28:48.7467722Z Installing collected packages: typing-extensions, rpds-py, pyyaml, attrs, referencing, jsonschema-specifications, jsonschema
-2026-08-03T16:28:48.9597111Z 
-2026-08-03T16:28:48.9607473Z Successfully installed attrs-26.1.0 jsonschema-4.26.0 jsonschema-specifications-2025.9.1 pyyaml-6.0.3 referencing-0.37.0 rpds-py-2026.6.3 typing-extensions-4.16.0
-2026-08-03T16:28:48.9614972Z 
-2026-08-03T16:28:48.9615505Z [notice] A new release of pip is available: 26.1.2 -> 26.2
-2026-08-03T16:28:48.9616249Z [notice] To update, run: pip install --upgrade pip
-﻿2026-08-03T16:28:49.0196432Z ##[group]Run python scripts/validate_schemas.py --schema-dir schemas/
-2026-08-03T16:28:49.0197019Z [36;1mpython scripts/validate_schemas.py --schema-dir schemas/[0m
-2026-08-03T16:28:49.0242054Z shell: /usr/bin/bash -e {0}
-2026-08-03T16:28:49.0242339Z env:
-2026-08-03T16:28:49.0242555Z   SERVICE_DIR: services/data/mls-ingestion
-2026-08-03T16:28:49.0242862Z   PYTHON_VERSION: 3.11
-2026-08-03T16:28:49.0243083Z   IMAGE_NAME: mls-ingestion
-2026-08-03T16:28:49.0243380Z   pythonLocation: /opt/hostedtoolcache/Python/3.11.15/x64
-2026-08-03T16:28:49.0243806Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.11.15/x64/lib/pkgconfig
-2026-08-03T16:28:49.0244228Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.15/x64
-2026-08-03T16:28:49.0244610Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.15/x64
-2026-08-03T16:28:49.0245008Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.15/x64
-2026-08-03T16:28:49.0245633Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.11.15/x64/lib
-2026-08-03T16:28:49.0245960Z ##[endgroup]
-2026-08-03T16:28:49.0400181Z python: can't open file '/home/runner/work/pace-stagecraft-monorepo/pace-stagecraft-monorepo/services/data/mls-ingestion/scripts/validate_schemas.py': [Errno 2] No such file or directory
-2026-08-03T16:28:49.0430731Z ##[error]Process completed with exit code 2.
-2026-08-03T16:28:42.2150000Z Requested labels: ubuntu-latest
-2026-08-03T16:28:42.2150000Z Job defined at: StagecraftOps/pace-stagecraft-monorepo/.github/workflows/ci-mls-ingestion.yml@refs/pull/36/merge
-2026-08-03T16:28:42.2150000Z Waiting for a runner to pick up this job...
-2026-08-03T16:28:42.2210000Z Job is waiting for a hosted runner to come online.
-2026-08-03T16:28:42.2150000Z Evaluating validate-schema.if
-2026-08-03T16:28:42.2150000Z Evaluating: success()
-2026-08-03T16:28:42.2150000Z Result: true
-2026-08-03T16:28:42.2210000Z Job is about to start running on the hosted runner: GitHub Actions 1000002208
+5850998Z [36;1mecho "EOF" >> $GITHUB_OUTPUT[0m
+2026-08-03T16:29:05.5898894Z shell: /usr/bin/bash -e {0}
+2026-08-03T16:29:05.5899462Z ##[endgroup]
+﻿2026-08-03T16:29:05.6101160Z ##[group]Run case "success" in
+2026-08-03T16:29:05.6102111Z [36;1mcase "success" in[0m
+2026-08-03T16:29:05.6102650Z [36;1m  SUCCESS|success)[0m
+2026-08-03T16:29:05.6103190Z [36;1m    echo "emoji=✅" >> $GITHUB_OUTPUT[0m
+2026-08-03T16:29:05.6103832Z [36;1m    echo "color=#36a64f" >> $GITHUB_OUTPUT[0m
+2026-08-03T16:29:05.6104420Z [36;1m    ;;[0m
+2026-08-03T16:29:05.6104879Z [36;1m  FAILURE|failure|FAILED|failed)[0m
+2026-08-03T16:29:05.6105473Z [36;1m    echo "emoji=❌" >> $GITHUB_OUTPUT[0m
+2026-08-03T16:29:05.6106083Z [36;1m    echo "color=#ff0000" >> $GITHUB_OUTPUT[0m
+2026-08-03T16:29:05.6106674Z [36;1m    ;;[0m
+2026-08-03T16:29:05.6107110Z [36;1m  ROLLBACK|rollback)[0m
+2026-08-03T16:29:05.6107639Z [36;1m    echo "emoji=⏪" >> $GITHUB_OUTPUT[0m
+2026-08-03T16:29:05.6108245Z [36;1m    echo "color=#ff9900" >> $GITHUB_OUTPUT[0m
+2026-08-03T16:29:05.6109066Z [36;1m    ;;[0m
+2026-08-03T16:29:05.6109510Z [36;1m  IN_PROGRESS|in_progress)[0m
+2026-08-03T16:29:05.6110075Z [36;1m    echo "emoji=🔄" >> $GITHUB_OUTPUT[0m
+2026-08-03T16:29:05.6110752Z [36;1m    echo "color=#0066cc" >> $GITHUB_OUTPUT[0m
+2026-08-03T16:29:05.6111640Z [36;1m    ;;[0m
+2026-08-03T16:29:05.6112410Z [36;1m  AUDIT_COMPLETE|audit_complete)[0m
+2026-08-03T16:29:05.6113385Z [36;1m    echo "emoji=🔍" >> $GITHUB_OUTPUT[0m
+2026-08-03T16:29:05.6114320Z [36;1m    echo "color=#9933cc" >> $GITHUB_OUTPUT[0m
+2026-08-03T16:29:05.6114901Z [36;1m    ;;[0m
+2026-08-03T16:29:05.6115315Z [36;1m  *)[0m
+2026-08-03T16:29:05.6115776Z [36;1m    echo "emoji=ℹ️" >> $GITHUB_OUTPUT[0m
+2026-08-03T16:29:05.6116394Z [36;1m    echo "color=#cccccc" >> $GITHUB_OUTPUT[0m
+2026-08-03T16:29:05.6116966Z [36;1m    ;;[0m
+2026-08-03T16:29:05.6117375Z [36;1mesac[0m
+2026-08-03T16:29:05.6161639Z shell: /usr/bin/bash -e {0}
+2026-08-03T16:29:05.6162183Z ##[endgroup]
+﻿2026-08-03T16:29:05.6287816Z ##[group]Run if [ -n "$WEBHOOK" ]; then
+2026-08-03T16:29:05.6288501Z [36;1mif [ -n "$WEBHOOK" ]; then[0m
+2026-08-03T16:29:05.6289085Z [36;1m  echo "available=true" >> "$GITHUB_OUTPUT"[0m
+2026-08-03T16:29:05.6289665Z [36;1melse[0m
+2026-08-03T16:29:05.6290143Z [36;1m  echo "available=false" >> "$GITHUB_OUTPUT"[0m
+2026-08-03T16:29:05.6291019Z [36;1m  echo "::notice::SLACK_WEBHOOK_URL not configured — notification will be skipped"[0m
+2026-08-03T16:29:05.6292158Z [36;1mfi[0m
+2026-08-03T16:29:05.6332789Z shell: /usr/bin/bash -e {0}
+2026-08-03T16:29:05.6333295Z env:
+2026-08-03T16:29:05.6333678Z   WEBHOOK: 
+2026-08-03T16:29:05.6334079Z ##[endgroup]
+2026-08-03T16:29:05.6416037Z ##[notice]SLACK_WEBHOOK_URL not configured — notification will be skipped
+2026-08-03T16:28:56.4720000Z Requested labels: ubuntu-latest
+2026-08-03T16:28:56.4720000Z Job defined at: StagecraftOps/pace-stagecraft-monorepo/.github/workflows/_template-notify-slack.yml@refs/pull/36/merge
+2026-08-03T16:28:56.4720000Z Reusable workflow chain:
+2026-08-03T16:28:56.4720000Z StagecraftOps/pace-stagecraft-monorepo/.github/workflows/ci-notification-service.yml@refs/pull/36/merge (06ce8ed24c08b107070b7ab8da0e8ccce8d93203)
+2026-08-03T16:28:56.4720000Z -> StagecraftOps/pace-stagecraft-monorepo/.github/workflows/_template-notify-slack.yml@refs/pull/36/merge (06ce8ed24c08b107070b7ab8da0e8ccce8d93203)
+2026-08-03T16:28:56.4720000Z Waiting for a runner to pick up this job...
+2026-08-03T16:28:56.4700000Z Evaluating notify.if
+2026-08-03T16:28:56.4700000Z Evaluating: always()
+2026-08-03T16:28:56.4700000Z Result: true
+2026-08-03T16:28:56.4700000Z Evaluating notify.notify-slack.if
+2026-08-03T16:28:56.4700000Z Evaluating: success()
+2026-08-03T16:28:56.4700000Z Result: true
+2026-08-03T16:29:00.5150000Z Job is about to start running on the hosted runner: GitHub Actions 1000002235
+2026-08-03T16:29:00.5150000Z Job is waiting for a hosted runner to come online.
 ```
 
 ## Instructions

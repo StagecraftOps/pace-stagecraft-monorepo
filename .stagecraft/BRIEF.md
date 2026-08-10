@@ -1,14 +1,14 @@
 # StageCraft Failure Brief -- StagecraftOps/pace-stagecraft-monorepo
 
-## Failed workflow: CI - Notification Service (.github/workflows/ci-notification-service.yml)
+## Failed workflow: CI - Clickstream Pipeline (.github/workflows/ci-clickstream-pipeline.yml)
 
 ## Root cause (from automated analysis)
 
-The `actions/setup-node@v7` step in the `lint` job fails with: `##[error]Some specified paths were not resolved, unable to cache dependencies.` This means the file referenced by `cache-dependency-path: services/notification/notification-service/package-lock.json` does not exist in the repository at that path. npm's cache setup requires the lock file to be present at the exact path specified; when it cannot find it, the entire step errors out and the job fails before any linting or testing can occur. The `package-lock.json` is either missing from the repo (was never committed or was .gitignored) or the service directory `services/notification/notification-service` itself does not yet exist in the repository.
+The 'Run flake8' step (and all subsequent lint steps) fail with 'FileNotFoundError: [Errno 2] No such file or directory: src/' because the src/ subdirectory does not exist under services/data/clickstream-pipeline in the checked-out commit (PR #36 merge ref 3e2748244e). The workflow correctly sets working-directory to services/data/clickstream-pipeline, but the source tree that all lint and test steps depend on is simply absent from the repository at that path.
 
 ## Why this is a code-level issue, not a pipeline config issue
 
-The missing `package-lock.json` at `services/notification/notification-service/package-lock.json` is a repository content problem — the file (and likely the service directory) needs to be added to the repo, not a workflow YAML change.
+The src/ directory (and likely the entire service source tree) is missing from services/data/clickstream-pipeline in the repository content — the workflow configuration is correct and no YAML change will resolve a missing application source directory.
 
 Failure category: UNKNOWN
 
@@ -21,64 +21,64 @@ Failure category: UNKNOWN
 ## Relevant log excerpt
 
 ```
-5339745Z [36;1mecho "EOF" >> $GITHUB_OUTPUT[0m
-2026-08-10T16:25:55.5392381Z shell: /usr/bin/bash -e {0}
-2026-08-10T16:25:55.5393494Z ##[endgroup]
-﻿2026-08-10T16:25:55.6851835Z ##[group]Run case "success" in
-2026-08-10T16:25:55.6853013Z [36;1mcase "success" in[0m
-2026-08-10T16:25:55.6853990Z [36;1m  SUCCESS|success)[0m
-2026-08-10T16:25:55.6855050Z [36;1m    echo "emoji=✅" >> $GITHUB_OUTPUT[0m
-2026-08-10T16:25:55.6856342Z [36;1m    echo "color=#36a64f" >> $GITHUB_OUTPUT[0m
-2026-08-10T16:25:55.6857541Z [36;1m    ;;[0m
-2026-08-10T16:25:55.6858420Z [36;1m  FAILURE|failure|FAILED|failed)[0m
-2026-08-10T16:25:55.6859631Z [36;1m    echo "emoji=❌" >> $GITHUB_OUTPUT[0m
-2026-08-10T16:25:55.6860917Z [36;1m    echo "color=#ff0000" >> $GITHUB_OUTPUT[0m
-2026-08-10T16:25:55.6862255Z [36;1m    ;;[0m
-2026-08-10T16:25:55.6863091Z [36;1m  ROLLBACK|rollback)[0m
-2026-08-10T16:25:55.6864161Z [36;1m    echo "emoji=⏪" >> $GITHUB_OUTPUT[0m
-2026-08-10T16:25:55.6865446Z [36;1m    echo "color=#ff9900" >> $GITHUB_OUTPUT[0m
-2026-08-10T16:25:55.6866868Z [36;1m    ;;[0m
-2026-08-10T16:25:55.6867710Z [36;1m  IN_PROGRESS|in_progress)[0m
-2026-08-10T16:25:55.6868862Z [36;1m    echo "emoji=🔄" >> $GITHUB_OUTPUT[0m
-2026-08-10T16:25:55.6870218Z [36;1m    echo "color=#0066cc" >> $GITHUB_OUTPUT[0m
-2026-08-10T16:25:55.6871400Z [36;1m    ;;[0m
-2026-08-10T16:25:55.6872409Z [36;1m  AUDIT_COMPLETE|audit_complete)[0m
-2026-08-10T16:25:55.6873638Z [36;1m    echo "emoji=🔍" >> $GITHUB_OUTPUT[0m
-2026-08-10T16:25:55.6874917Z [36;1m    echo "color=#9933cc" >> $GITHUB_OUTPUT[0m
-2026-08-10T16:25:55.6876093Z [36;1m    ;;[0m
-2026-08-10T16:25:55.6876865Z [36;1m  *)[0m
-2026-08-10T16:25:55.6877736Z [36;1m    echo "emoji=ℹ️" >> $GITHUB_OUTPUT[0m
-2026-08-10T16:25:55.6879022Z [36;1m    echo "color=#cccccc" >> $GITHUB_OUTPUT[0m
-2026-08-10T16:25:55.6880204Z [36;1m    ;;[0m
-2026-08-10T16:25:55.6880985Z [36;1mesac[0m
-2026-08-10T16:25:55.6929972Z shell: /usr/bin/bash -e {0}
-2026-08-10T16:25:55.6930976Z ##[endgroup]
-﻿2026-08-10T16:25:55.8338473Z ##[group]Run if [ -n "$WEBHOOK" ]; then
-2026-08-10T16:25:55.8339833Z [36;1mif [ -n "$WEBHOOK" ]; then[0m
-2026-08-10T16:25:55.8341040Z [36;1m  echo "available=true" >> "$GITHUB_OUTPUT"[0m
-2026-08-10T16:25:55.8342455Z [36;1melse[0m
-2026-08-10T16:25:55.8343417Z [36;1m  echo "available=false" >> "$GITHUB_OUTPUT"[0m
-2026-08-10T16:25:55.8345304Z [36;1m  echo "::notice::SLACK_WEBHOOK_URL not configured — notification will be skipped"[0m
-2026-08-10T16:25:55.8347080Z [36;1mfi[0m
-2026-08-10T16:25:55.8397578Z shell: /usr/bin/bash -e {0}
-2026-08-10T16:25:55.8398552Z env:
-2026-08-10T16:25:55.8399287Z   WEBHOOK: 
-2026-08-10T16:25:55.8400026Z ##[endgroup]
-2026-08-10T16:25:55.8504806Z ##[notice]SLACK_WEBHOOK_URL not configured — notification will be skipped
-2026-08-10T16:25:46.5910000Z Evaluating notify.if
-2026-08-10T16:25:46.5910000Z Evaluating: always()
-2026-08-10T16:25:46.5910000Z Result: true
-2026-08-10T16:25:46.5910000Z Evaluating notify.notify-slack.if
-2026-08-10T16:25:46.5910000Z Evaluating: success()
-2026-08-10T16:25:46.5910000Z Result: true
-2026-08-10T16:25:46.5950000Z Requested labels: ubuntu-latest
-2026-08-10T16:25:46.5950000Z Job defined at: StagecraftOps/pace-stagecraft-monorepo/.github/workflows/_template-notify-slack.yml@refs/pull/36/merge
-2026-08-10T16:25:46.5950000Z Reusable workflow chain:
-2026-08-10T16:25:46.5950000Z StagecraftOps/pace-stagecraft-monorepo/.github/workflows/ci-notification-service.yml@refs/pull/36/merge (3e2748244e6d8d59a67ddd32b4a10c4ebbde8d4c)
-2026-08-10T16:25:46.5950000Z -> StagecraftOps/pace-stagecraft-monorepo/.github/workflows/_template-notify-slack.yml@refs/pull/36/merge (3e2748244e6d8d59a67ddd32b4a10c4ebbde8d4c)
-2026-08-10T16:25:46.5950000Z Waiting for a runner to pick up this job...
-2026-08-10T16:25:49.1440000Z Job is about to start running on the hosted runner: GitHub Actions 1000002751
-2026-08-10T16:25:49.1430000Z Job is waiting for a hosted runner to come online.
+3271587Z [36;1mecho "EOF" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:57.3326369Z shell: /usr/bin/bash -e {0}
+2026-08-10T16:25:57.3327677Z ##[endgroup]
+﻿2026-08-10T16:25:57.3659647Z ##[group]Run case "success" in
+2026-08-10T16:25:57.3660839Z [36;1mcase "success" in[0m
+2026-08-10T16:25:57.3661893Z [36;1m  SUCCESS|success)[0m
+2026-08-10T16:25:57.3663233Z [36;1m    echo "emoji=✅" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:57.3664552Z [36;1m    echo "color=#36a64f" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:57.3665763Z [36;1m    ;;[0m
+2026-08-10T16:25:57.3666730Z [36;1m  FAILURE|failure|FAILED|failed)[0m
+2026-08-10T16:25:57.3667978Z [36;1m    echo "emoji=❌" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:57.3669286Z [36;1m    echo "color=#ff0000" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:57.3670494Z [36;1m    ;;[0m
+2026-08-10T16:25:57.3671423Z [36;1m  ROLLBACK|rollback)[0m
+2026-08-10T16:25:57.3672536Z [36;1m    echo "emoji=⏪" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:57.3674024Z [36;1m    echo "color=#ff9900" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:57.3675468Z [36;1m    ;;[0m
+2026-08-10T16:25:57.3676420Z [36;1m  IN_PROGRESS|in_progress)[0m
+2026-08-10T16:25:57.3677607Z [36;1m    echo "emoji=🔄" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:57.3678945Z [36;1m    echo "color=#0066cc" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:57.3680156Z [36;1m    ;;[0m
+2026-08-10T16:25:57.3681114Z [36;1m  AUDIT_COMPLETE|audit_complete)[0m
+2026-08-10T16:25:57.3682353Z [36;1m    echo "emoji=🔍" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:57.3683783Z [36;1m    echo "color=#9933cc" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:57.3684962Z [36;1m    ;;[0m
+2026-08-10T16:25:57.3685825Z [36;1m  *)[0m
+2026-08-10T16:25:57.3686782Z [36;1m    echo "emoji=ℹ️" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:57.3688070Z [36;1m    echo "color=#cccccc" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:57.3689265Z [36;1m    ;;[0m
+2026-08-10T16:25:57.3690137Z [36;1mesac[0m
+2026-08-10T16:25:57.3739190Z shell: /usr/bin/bash -e {0}
+2026-08-10T16:25:57.3740243Z ##[endgroup]
+﻿2026-08-10T16:25:57.3903996Z ##[group]Run if [ -n "$WEBHOOK" ]; then
+2026-08-10T16:25:57.3905259Z [36;1mif [ -n "$WEBHOOK" ]; then[0m
+2026-08-10T16:25:57.3906471Z [36;1m  echo "available=true" >> "$GITHUB_OUTPUT"[0m
+2026-08-10T16:25:57.3907698Z [36;1melse[0m
+2026-08-10T16:25:57.3908711Z [36;1m  echo "available=false" >> "$GITHUB_OUTPUT"[0m
+2026-08-10T16:25:57.3910465Z [36;1m  echo "::notice::SLACK_WEBHOOK_URL not configured — notification will be skipped"[0m
+2026-08-10T16:25:57.3912111Z [36;1mfi[0m
+2026-08-10T16:25:57.3958422Z shell: /usr/bin/bash -e {0}
+2026-08-10T16:25:57.3959452Z env:
+2026-08-10T16:25:57.3960269Z   WEBHOOK: 
+2026-08-10T16:25:57.3961108Z ##[endgroup]
+2026-08-10T16:25:57.4056676Z ##[notice]SLACK_WEBHOOK_URL not configured — notification will be skipped
+2026-08-10T16:25:48.4500000Z Requested labels: ubuntu-latest
+2026-08-10T16:25:48.4500000Z Job defined at: StagecraftOps/pace-stagecraft-monorepo/.github/workflows/_template-notify-slack.yml@refs/pull/36/merge
+2026-08-10T16:25:48.4500000Z Reusable workflow chain:
+2026-08-10T16:25:48.4500000Z StagecraftOps/pace-stagecraft-monorepo/.github/workflows/ci-clickstream-pipeline.yml@refs/pull/36/merge (3e2748244e6d8d59a67ddd32b4a10c4ebbde8d4c)
+2026-08-10T16:25:48.4500000Z -> StagecraftOps/pace-stagecraft-monorepo/.github/workflows/_template-notify-slack.yml@refs/pull/36/merge (3e2748244e6d8d59a67ddd32b4a10c4ebbde8d4c)
+2026-08-10T16:25:48.4500000Z Waiting for a runner to pick up this job...
+2026-08-10T16:25:48.4460000Z Evaluating notify.if
+2026-08-10T16:25:48.4460000Z Evaluating: always()
+2026-08-10T16:25:48.4460000Z Result: true
+2026-08-10T16:25:48.4460000Z Evaluating notify.notify-slack.if
+2026-08-10T16:25:48.4460000Z Evaluating: success()
+2026-08-10T16:25:48.4460000Z Result: true
+2026-08-10T16:25:53.4370000Z Job is waiting for a hosted runner to come online.
+2026-08-10T16:25:53.4380000Z Job is about to start running on the hosted runner: GitHub Actions 1000002755
 ```
 
 ## Instructions

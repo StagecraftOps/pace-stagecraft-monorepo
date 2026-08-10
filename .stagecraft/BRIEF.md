@@ -1,16 +1,16 @@
 # StageCraft Failure Brief -- StagecraftOps/pace-stagecraft-monorepo
 
-## Failed workflow: CI - MLS Ingestion Service (.github/workflows/ci-mls-ingestion.yml)
+## Failed workflow: CI - AVM Training Pipeline (.github/workflows/ci-avm-training-pipeline.yml)
 
 ## Root cause (from automated analysis)
 
-The validate-schema job fails with exit code 2 (FileNotFoundError) because the script `services/data/mls-ingestion/scripts/validate_schemas.py` does not exist in the repository at the PR merge commit (3e27482). Python cannot open the file, so the step exits immediately, blocking all downstream jobs (lint, test, docker-build, deploy-staging, security-scan).
+The 'Run flake8' step fails with `E902 FileNotFoundError: [Errno 2] No such file or directory: 'src/'` when flake8 runs with `working-directory: services/data/avm-training-pipeline`. The `src/` subdirectory does not exist within that service directory in the repository at commit 3e27482 (PR #36). The same missing-directory issue would cascade to the `black` and `isort` steps targeting `src/` as well. This is an absent source directory in the repository content — the `services/data/avm-training-pipeline/src/` tree has not been committed.
 
 ## Why this is a code-level issue, not a pipeline config issue
 
-The workflow YAML correctly sets `working-directory` and references the script by a valid relative path, but the file `scripts/validate_schemas.py` (and likely the entire `scripts/` directory) is simply missing from the repository content at this commit and must be added to the repo.
+The `src/` directory referenced by all three linting steps does not exist in the committed repository content for this service, requiring the missing source tree to be added to the repo rather than any change to the workflow YAML.
 
-Failure category: CONFIG_ERROR
+Failure category: UNKNOWN
 
 ## Application Context
 
@@ -21,50 +21,62 @@ Failure category: CONFIG_ERROR
 ## Relevant log excerpt
 
 ```
-41Z   Downloading referencing-0.37.0-py3-none-any.whl.metadata (2.8 kB)
-2026-08-10T16:25:38.7316811Z Collecting rpds-py>=0.25.0 (from jsonschema)
-2026-08-10T16:25:38.7393455Z   Downloading rpds_py-2026.6.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.1 kB)
-2026-08-10T16:25:38.8351725Z Collecting typing-extensions>=4.4.0 (from referencing>=0.28.4->jsonschema)
-2026-08-10T16:25:38.8427447Z   Downloading typing_extensions-4.16.0-py3-none-any.whl.metadata (3.3 kB)
-2026-08-10T16:25:38.8540020Z Downloading jsonschema-4.26.0-py3-none-any.whl (90 kB)
-2026-08-10T16:25:38.8726128Z Downloading pyyaml-6.0.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (806 kB)
-2026-08-10T16:25:38.9016170Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 806.6/806.6 kB 34.3 MB/s  0:00:00
-2026-08-10T16:25:38.9087714Z Downloading attrs-26.1.0-py3-none-any.whl (67 kB)
-2026-08-10T16:25:38.9179174Z Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl (18 kB)
-2026-08-10T16:25:38.9271182Z Downloading referencing-0.37.0-py3-none-any.whl (26 kB)
-2026-08-10T16:25:38.9364952Z Downloading rpds_py-2026.6.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (371 kB)
-2026-08-10T16:25:38.9472428Z Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
-2026-08-10T16:25:38.9849102Z Installing collected packages: typing-extensions, rpds-py, pyyaml, attrs, referencing, jsonschema-specifications, jsonschema
-2026-08-10T16:25:39.2097468Z 
-2026-08-10T16:25:39.2107786Z Successfully installed attrs-26.1.0 jsonschema-4.26.0 jsonschema-specifications-2025.9.1 pyyaml-6.0.3 referencing-0.37.0 rpds-py-2026.6.3 typing-extensions-4.16.0
-2026-08-10T16:25:39.2115602Z 
-2026-08-10T16:25:39.2115973Z [notice] A new release of pip is available: 26.1.2 -> 26.2.1
-2026-08-10T16:25:39.2116454Z [notice] To update, run: pip install --upgrade pip
-﻿2026-08-10T16:25:39.2648200Z ##[group]Run python scripts/validate_schemas.py --schema-dir schemas/
-2026-08-10T16:25:39.2648799Z [36;1mpython scripts/validate_schemas.py --schema-dir schemas/[0m
-2026-08-10T16:25:39.2693256Z shell: /usr/bin/bash -e {0}
-2026-08-10T16:25:39.2693529Z env:
-2026-08-10T16:25:39.2693775Z   SERVICE_DIR: services/data/mls-ingestion
-2026-08-10T16:25:39.2694059Z   PYTHON_VERSION: 3.11
-2026-08-10T16:25:39.2694281Z   IMAGE_NAME: mls-ingestion
-2026-08-10T16:25:39.2694584Z   pythonLocation: /opt/hostedtoolcache/Python/3.11.15/x64
-2026-08-10T16:25:39.2695040Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.11.15/x64/lib/pkgconfig
-2026-08-10T16:25:39.2695470Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.15/x64
-2026-08-10T16:25:39.2695856Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.15/x64
-2026-08-10T16:25:39.2696244Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.15/x64
-2026-08-10T16:25:39.2696637Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.11.15/x64/lib
-2026-08-10T16:25:39.2696961Z ##[endgroup]
-2026-08-10T16:25:39.2850069Z python: can't open file '/home/runner/work/pace-stagecraft-monorepo/pace-stagecraft-monorepo/services/data/mls-ingestion/scripts/validate_schemas.py': [Errno 2] No such file or directory
-2026-08-10T16:25:39.2880728Z ##[error]Process completed with exit code 2.
-2026-08-10T16:25:31.5530000Z Evaluating validate-schema.if
-2026-08-10T16:25:31.5530000Z Evaluating: success()
-2026-08-10T16:25:31.5530000Z Result: true
-2026-08-10T16:25:31.5560000Z Requested labels: ubuntu-latest
-2026-08-10T16:25:31.5560000Z Job defined at: StagecraftOps/pace-stagecraft-monorepo/.github/workflows/ci-mls-ingestion.yml@refs/pull/36/merge
-2026-08-10T16:25:31.5560000Z Waiting for a runner to pick up this job...
-2026-08-10T16:25:32.1500000Z All GitHub-hosted runners with label [ubuntu-latest] are busy. For more information, see https://gh.io/job-concurrency-limits
-2026-08-10T16:25:32.1590000Z Job is waiting for a hosted runner to come online.
-2026-08-10T16:25:32.1590000Z Job is about to start running on the hosted runner: GitHub Actions 1000002734
+-10T16:25:53.0769302Z ##[group]Run case "success" in
+2026-08-10T16:25:53.0770534Z [36;1mcase "success" in[0m
+2026-08-10T16:25:53.0771615Z [36;1m  SUCCESS|success)[0m
+2026-08-10T16:25:53.0773064Z [36;1m    echo "emoji=✅" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:53.0774507Z [36;1m    echo "color=#36a64f" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:53.0775803Z [36;1m    ;;[0m
+2026-08-10T16:25:53.0776766Z [36;1m  FAILURE|failure|FAILED|failed)[0m
+2026-08-10T16:25:53.0778093Z [36;1m    echo "emoji=❌" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:53.0779490Z [36;1m    echo "color=#ff0000" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:53.0780779Z [36;1m    ;;[0m
+2026-08-10T16:25:53.0781692Z [36;1m  ROLLBACK|rollback)[0m
+2026-08-10T16:25:53.0783093Z [36;1m    echo "emoji=⏪" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:53.0784500Z [36;1m    echo "color=#ff9900" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:53.0786010Z [36;1m    ;;[0m
+2026-08-10T16:25:53.0786957Z [36;1m  IN_PROGRESS|in_progress)[0m
+2026-08-10T16:25:53.0788200Z [36;1m    echo "emoji=🔄" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:53.0789657Z [36;1m    echo "color=#0066cc" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:53.0790934Z [36;1m    ;;[0m
+2026-08-10T16:25:53.0791898Z [36;1m  AUDIT_COMPLETE|audit_complete)[0m
+2026-08-10T16:25:53.0793524Z [36;1m    echo "emoji=🔍" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:53.0794923Z [36;1m    echo "color=#9933cc" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:53.0796199Z [36;1m    ;;[0m
+2026-08-10T16:25:53.0797067Z [36;1m  *)[0m
+2026-08-10T16:25:53.0798018Z [36;1m    echo "emoji=ℹ️" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:53.0799403Z [36;1m    echo "color=#cccccc" >> $GITHUB_OUTPUT[0m
+2026-08-10T16:25:53.0800682Z [36;1m    ;;[0m
+2026-08-10T16:25:53.0801546Z [36;1mesac[0m
+2026-08-10T16:25:53.0848872Z shell: /usr/bin/bash -e {0}
+2026-08-10T16:25:53.0849946Z ##[endgroup]
+﻿2026-08-10T16:25:53.1020080Z ##[group]Run if [ -n "$WEBHOOK" ]; then
+2026-08-10T16:25:53.1021462Z [36;1mif [ -n "$WEBHOOK" ]; then[0m
+2026-08-10T16:25:53.1022982Z [36;1m  echo "available=true" >> "$GITHUB_OUTPUT"[0m
+2026-08-10T16:25:53.1024320Z [36;1melse[0m
+2026-08-10T16:25:53.1025369Z [36;1m  echo "available=false" >> "$GITHUB_OUTPUT"[0m
+2026-08-10T16:25:53.1027382Z [36;1m  echo "::notice::SLACK_WEBHOOK_URL not configured — notification will be skipped"[0m
+2026-08-10T16:25:53.1029231Z [36;1mfi[0m
+2026-08-10T16:25:53.1075404Z shell: /usr/bin/bash -e {0}
+2026-08-10T16:25:53.1076458Z env:
+2026-08-10T16:25:53.1077267Z   WEBHOOK: 
+2026-08-10T16:25:53.1078109Z ##[endgroup]
+2026-08-10T16:25:53.1175458Z ##[notice]SLACK_WEBHOOK_URL not configured — notification will be skipped
+2026-08-10T16:25:44.1900000Z Evaluating notify.if
+2026-08-10T16:25:44.1900000Z Evaluating: always()
+2026-08-10T16:25:44.1900000Z Result: true
+2026-08-10T16:25:44.1900000Z Evaluating notify.notify-slack.if
+2026-08-10T16:25:44.1900000Z Evaluating: success()
+2026-08-10T16:25:44.1900000Z Result: true
+2026-08-10T16:25:44.1920000Z Requested labels: ubuntu-latest
+2026-08-10T16:25:44.1920000Z Job defined at: StagecraftOps/pace-stagecraft-monorepo/.github/workflows/_template-notify-slack.yml@refs/pull/36/merge
+2026-08-10T16:25:44.1920000Z Reusable workflow chain:
+2026-08-10T16:25:44.1920000Z StagecraftOps/pace-stagecraft-monorepo/.github/workflows/ci-avm-training-pipeline.yml@refs/pull/36/merge (3e2748244e6d8d59a67ddd32b4a10c4ebbde8d4c)
+2026-08-10T16:25:44.1920000Z -> StagecraftOps/pace-stagecraft-monorepo/.github/workflows/_template-notify-slack.yml@refs/pull/36/merge (3e2748244e6d8d59a67ddd32b4a10c4ebbde8d4c)
+2026-08-10T16:25:44.1920000Z Waiting for a runner to pick up this job...
+2026-08-10T16:25:44.5310000Z All GitHub-hosted runners with label [ubuntu-latest] are busy. For more information, see https://gh.io/job-concurrency-limits
+2026-08-10T16:25:47.5640000Z Job is waiting for a hosted runner to come online.
+2026-08-10T16:25:47.5630000Z Job is about to start running on the hosted runner: GitHub Actions 1000002748
 ```
 
 ## Instructions

@@ -1,16 +1,16 @@
 # StageCraft Failure Brief -- StagecraftOps/pace-stagecraft-monorepo
 
-## Failed workflow: CI - Push Notification Service (.github/workflows/ci-push-notification-service.yml)
+## Failed workflow: Security & Compliance Audit (.github/workflows/compliance-security-audit.yml)
 
 ## Root cause (from automated analysis)
 
-actions/setup-node@v7 fails with '##[error]Some specified paths were not resolved, unable to cache dependencies.' because the file referenced by cache-dependency-path — services/notification/push-notification-service/package-lock.json — does not exist in the repository. The package-lock.json (and likely the package.json it is generated from) is missing from the push-notification-service directory, so the npm dependency cache cannot be keyed and the setup-node step aborts, blocking lint and all downstream jobs.
+The 'Secrets Scan' job is the hard-blocking failure: TruffleHog detected 1 potential secret committed directly in the repository (exit code 1, `##[error]TruffleHog detected potential secrets in the repository`). This is a repository content issue — a credential, token, or key-like string exists in a tracked file. The SAST scan job has two additional compounding problems: (1) the `SNYK_TOKEN` secret is either missing, revoked, or mis-named in the repository's Actions secrets, causing Snyk to return HTTP 401 `SNYK_-0005` authentication failure, which means no SARIF output file is produced and the subsequent `github/codeql-action/upload-sarif` step fails with `Path does not exist: snyk-ml.sarif`; (2) the `sast-full-scan` job runs `snyk/actions/python@master` with `--all-projects` but never installs Go via `actions/setup-go`, so all Go modules under `services/search/` fail with 'The go command is not available'; and (3) multiple `package.json` files under `services/search/` contain a UTF-8 BOM character (`\xEF\xBB\xBF`) making them unparseable as JSON by Snyk. The BOM-corrupted JSON files and missing Go setup are repository/pipeline content problems respectively, but the primary hard failure causing the run to stop is the committed secret detected by TruffleHog, which is a repository content problem, combined with the invalid/missing SNYK_TOKEN secret which is a pipeline configuration problem.
 
 ## Why this is a code-level issue, not a pipeline config issue
 
-The package-lock.json lockfile is absent from the service directory in the repository itself — adding or committing it (along with a package.json if also missing) is a repository-content fix, not a workflow YAML change.
+The blocking TruffleHog failure requires removing a committed secret from repository history/content, and the BOM-corrupted package.json files require fixing source files in the repo — neither is addressable by editing the workflow YAML alone; however the missing SNYK_TOKEN secret and absent `actions/setup-go` step are also co-present pipeline-level issues that must be fixed in the workflow.
 
-Failure category: UNKNOWN
+Failure category: CONFIG_ERROR
 
 ## Application Context
 
@@ -21,62 +21,53 @@ Failure category: UNKNOWN
 ## Relevant log excerpt
 
 ```
-16:29:13.2208782Z ##[group]Run case "success" in
-2026-08-03T16:29:13.2209713Z [36;1mcase "success" in[0m
-2026-08-03T16:29:13.2210478Z [36;1m  SUCCESS|success)[0m
-2026-08-03T16:29:13.2211300Z [36;1m    echo "emoji=✅" >> $GITHUB_OUTPUT[0m
-2026-08-03T16:29:13.2212282Z [36;1m    echo "color=#36a64f" >> $GITHUB_OUTPUT[0m
-2026-08-03T16:29:13.2213198Z [36;1m    ;;[0m
-2026-08-03T16:29:13.2213886Z [36;1m  FAILURE|failure|FAILED|failed)[0m
-2026-08-03T16:29:13.2214815Z [36;1m    echo "emoji=❌" >> $GITHUB_OUTPUT[0m
-2026-08-03T16:29:13.2215788Z [36;1m    echo "color=#ff0000" >> $GITHUB_OUTPUT[0m
-2026-08-03T16:29:13.2216699Z [36;1m    ;;[0m
-2026-08-03T16:29:13.2217357Z [36;1m  ROLLBACK|rollback)[0m
-2026-08-03T16:29:13.2218332Z [36;1m    echo "emoji=⏪" >> $GITHUB_OUTPUT[0m
-2026-08-03T16:29:13.2219326Z [36;1m    echo "color=#ff9900" >> $GITHUB_OUTPUT[0m
-2026-08-03T16:29:13.2220419Z [36;1m    ;;[0m
-2026-08-03T16:29:13.2221090Z [36;1m  IN_PROGRESS|in_progress)[0m
-2026-08-03T16:29:13.2221972Z [36;1m    echo "emoji=🔄" >> $GITHUB_OUTPUT[0m
-2026-08-03T16:29:13.2223008Z [36;1m    echo "color=#0066cc" >> $GITHUB_OUTPUT[0m
-2026-08-03T16:29:13.2223923Z [36;1m    ;;[0m
-2026-08-03T16:29:13.2224606Z [36;1m  AUDIT_COMPLETE|audit_complete)[0m
-2026-08-03T16:29:13.2225535Z [36;1m    echo "emoji=🔍" >> $GITHUB_OUTPUT[0m
-2026-08-03T16:29:13.2226516Z [36;1m    echo "color=#9933cc" >> $GITHUB_OUTPUT[0m
-2026-08-03T16:29:13.2227421Z [36;1m    ;;[0m
-2026-08-03T16:29:13.2228163Z [36;1m  *)[0m
-2026-08-03T16:29:13.2228875Z [36;1m    echo "emoji=ℹ️" >> $GITHUB_OUTPUT[0m
-2026-08-03T16:29:13.2229861Z [36;1m    echo "color=#cccccc" >> $GITHUB_OUTPUT[0m
-2026-08-03T16:29:13.2230778Z [36;1m    ;;[0m
-2026-08-03T16:29:13.2231400Z [36;1mesac[0m
-2026-08-03T16:29:13.2272069Z shell: /usr/bin/bash -e {0}
-2026-08-03T16:29:13.2272861Z ##[endgroup]
-﻿2026-08-03T16:29:13.2471797Z ##[group]Run if [ -n "$WEBHOOK" ]; then
-2026-08-03T16:29:13.2472828Z [36;1mif [ -n "$WEBHOOK" ]; then[0m
-2026-08-03T16:29:13.2473751Z [36;1m  echo "available=true" >> "$GITHUB_OUTPUT"[0m
-2026-08-03T16:29:13.2474672Z [36;1melse[0m
-2026-08-03T16:29:13.2475403Z [36;1m  echo "available=false" >> "$GITHUB_OUTPUT"[0m
-2026-08-03T16:29:13.2476825Z [36;1m  echo "::notice::SLACK_WEBHOOK_URL not configured — notification will be skipped"[0m
-2026-08-03T16:29:13.2478354Z [36;1mfi[0m
-2026-08-03T16:29:13.2518390Z shell: /usr/bin/bash -e {0}
-2026-08-03T16:29:13.2519161Z env:
-2026-08-03T16:29:13.2519723Z   WEBHOOK: 
-2026-08-03T16:29:13.2520299Z ##[endgroup]
-2026-08-03T16:29:13.2672084Z ##[notice]SLACK_WEBHOOK_URL not configured — notification will be skipped
-2026-08-03T16:29:07.7240000Z Evaluating notify.if
-2026-08-03T16:29:07.7240000Z Evaluating: always()
-2026-08-03T16:29:07.7240000Z Result: true
-2026-08-03T16:29:07.7240000Z Evaluating notify.notify-slack.if
-2026-08-03T16:29:07.7240000Z Evaluating: success()
-2026-08-03T16:29:07.7240000Z Result: true
-2026-08-03T16:29:07.7260000Z Requested labels: ubuntu-latest
-2026-08-03T16:29:07.7260000Z Job defined at: StagecraftOps/pace-stagecraft-monorepo/.github/workflows/_template-notify-slack.yml@refs/pull/36/merge
-2026-08-03T16:29:07.7260000Z Reusable workflow chain:
-2026-08-03T16:29:07.7260000Z StagecraftOps/pace-stagecraft-monorepo/.github/workflows/ci-push-notification-service.yml@refs/pull/36/merge (06ce8ed24c08b107070b7ab8da0e8ccce8d93203)
-2026-08-03T16:29:07.7260000Z -> StagecraftOps/pace-stagecraft-monorepo/.github/workflows/_template-notify-slack.yml@refs/pull/36/merge (06ce8ed24c08b107070b7ab8da0e8ccce8d93203)
-2026-08-03T16:29:07.7260000Z Waiting for a runner to pick up this job...
-2026-08-03T16:29:08.1040000Z All GitHub-hosted runners with label [ubuntu-latest] are busy. For more information, see https://gh.io/job-concurrency-limits
-2026-08-03T16:29:08.4000000Z Job is waiting for a hosted runner to come online.
-2026-08-03T16:29:08.4010000Z Job is about to start running on the hosted runner: GitHub Actions 1000002245
+08-10T04:00:26.1579662Z [36;1mecho "TruffleHog findings: $SECRETS_FOUND"[0m
+2026-08-10T04:00:26.1581094Z [36;1mif [ "$SECRETS_FOUND" -gt 0 ]; then[0m
+2026-08-10T04:00:26.1582826Z [36;1m  echo "::error::TruffleHog detected potential secrets in the repository"[0m
+2026-08-10T04:00:26.1584489Z [36;1m  exit 1[0m
+2026-08-10T04:00:26.1585504Z [36;1mfi[0m
+2026-08-10T04:00:26.1621290Z shell: /usr/bin/bash -e {0}
+2026-08-10T04:00:26.1622499Z ##[endgroup]
+2026-08-10T04:00:31.8793548Z TruffleHog findings: 1
+2026-08-10T04:00:31.8813469Z ##[error]TruffleHog detected potential secrets in the repository
+2026-08-10T04:00:31.8823960Z ##[error]Process completed with exit code 1.
+﻿2026-08-10T04:00:31.8904026Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+2026-08-10T04:00:31.8905667Z ##[group]Run actions/upload-artifact@v4
+2026-08-10T04:00:31.8906018Z with:
+2026-08-10T04:00:31.8906323Z   name: secrets-scan-results
+2026-08-10T04:00:31.8906730Z   path: trufflehog-results.json
+gitleaks-report.json
+
+2026-08-10T04:00:31.8907118Z   retention-days: 30
+2026-08-10T04:00:31.8907843Z   if-no-files-found: warn
+2026-08-10T04:00:31.8908187Z   compression-level: 6
+2026-08-10T04:00:31.8908825Z   overwrite: false
+2026-08-10T04:00:31.8909178Z   include-hidden-files: false
+2026-08-10T04:00:31.8909497Z ##[endgroup]
+2026-08-10T04:00:32.0351478Z (node:2212) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-08-10T04:00:32.0352507Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-08-10T04:00:32.0394533Z Multiple search paths detected. Calculating the least common ancestor of all paths
+2026-08-10T04:00:32.0399428Z The least common ancestor is /home/runner/work/pace-stagecraft-monorepo/pace-stagecraft-monorepo. This will be the root directory of the artifact
+2026-08-10T04:00:32.0400730Z With the provided path, there will be 1 file uploaded
+2026-08-10T04:00:32.0402121Z Artifact name is valid!
+2026-08-10T04:00:32.0402653Z Root directory input is valid!
+2026-08-10T04:00:32.3274378Z Beginning upload of artifact content to blob storage
+2026-08-10T04:00:32.3419448Z (node:2212) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+2026-08-10T04:00:32.5765260Z Uploaded bytes 581
+2026-08-10T04:00:32.6403524Z Finished uploading artifact content to blob storage!
+2026-08-10T04:00:32.6404607Z SHA256 digest of uploaded artifact zip is c63a632296910cd8c12169a78a0f07585ca10c9d3312b94b416c2cddeba332c6
+2026-08-10T04:00:32.6413297Z Finalizing artifact upload
+2026-08-10T04:00:32.8648780Z Artifact secrets-scan-results.zip successfully finalized. Artifact ID 9050032653
+2026-08-10T04:00:32.8649904Z Artifact secrets-scan-results has been successfully uploaded! Final size is 581 bytes. Artifact ID is 9050032653
+2026-08-10T04:00:32.8659825Z Artifact download URL: https://github.com/StagecraftOps/pace-stagecraft-monorepo/actions/runs/31354180492/artifacts/9050032653
+2026-08-10T04:00:21.3150000Z Evaluating secrets-scan.if
+2026-08-10T04:00:21.3150000Z Evaluating: success()
+2026-08-10T04:00:21.3150000Z Result: true
+2026-08-10T04:00:21.3170000Z Requested labels: ubuntu-latest
+2026-08-10T04:00:21.3170000Z Job defined at: StagecraftOps/pace-stagecraft-monorepo/.github/workflows/compliance-security-audit.yml@refs/heads/main
+2026-08-10T04:00:21.3170000Z Waiting for a runner to pick up this job...
+2026-08-10T04:00:21.3380000Z Job is waiting for a hosted runner to come online.
+2026-08-10T04:00:21.3390000Z Job is about to start running on the hosted runner: GitHub Actions 1000002692
 ```
 
 ## Instructions

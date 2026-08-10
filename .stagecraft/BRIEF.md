@@ -1,14 +1,14 @@
 # StageCraft Failure Brief -- StagecraftOps/pace-stagecraft-monorepo
 
-## Failed workflow: Security & Compliance Audit (.github/workflows/compliance-security-audit.yml)
+## Failed workflow: CI - MLS Ingestion Service (.github/workflows/ci-mls-ingestion.yml)
 
 ## Root cause (from automated analysis)
 
-The 'Secrets Scan' job is the hard-blocking failure: TruffleHog detected 1 potential secret committed directly in the repository (exit code 1, `##[error]TruffleHog detected potential secrets in the repository`). This is a repository content issue — a credential, token, or key-like string exists in a tracked file. The SAST scan job has two additional compounding problems: (1) the `SNYK_TOKEN` secret is either missing, revoked, or mis-named in the repository's Actions secrets, causing Snyk to return HTTP 401 `SNYK_-0005` authentication failure, which means no SARIF output file is produced and the subsequent `github/codeql-action/upload-sarif` step fails with `Path does not exist: snyk-ml.sarif`; (2) the `sast-full-scan` job runs `snyk/actions/python@master` with `--all-projects` but never installs Go via `actions/setup-go`, so all Go modules under `services/search/` fail with 'The go command is not available'; and (3) multiple `package.json` files under `services/search/` contain a UTF-8 BOM character (`\xEF\xBB\xBF`) making them unparseable as JSON by Snyk. The BOM-corrupted JSON files and missing Go setup are repository/pipeline content problems respectively, but the primary hard failure causing the run to stop is the committed secret detected by TruffleHog, which is a repository content problem, combined with the invalid/missing SNYK_TOKEN secret which is a pipeline configuration problem.
+The validate-schema job fails with exit code 2 (FileNotFoundError) because the script `services/data/mls-ingestion/scripts/validate_schemas.py` does not exist in the repository at the PR merge commit (3e27482). Python cannot open the file, so the step exits immediately, blocking all downstream jobs (lint, test, docker-build, deploy-staging, security-scan).
 
 ## Why this is a code-level issue, not a pipeline config issue
 
-The blocking TruffleHog failure requires removing a committed secret from repository history/content, and the BOM-corrupted package.json files require fixing source files in the repo — neither is addressable by editing the workflow YAML alone; however the missing SNYK_TOKEN secret and absent `actions/setup-go` step are also co-present pipeline-level issues that must be fixed in the workflow.
+The workflow YAML correctly sets `working-directory` and references the script by a valid relative path, but the file `scripts/validate_schemas.py` (and likely the entire `scripts/` directory) is simply missing from the repository content at this commit and must be added to the repo.
 
 Failure category: CONFIG_ERROR
 
@@ -21,53 +21,50 @@ Failure category: CONFIG_ERROR
 ## Relevant log excerpt
 
 ```
-08-10T04:00:26.1579662Z [36;1mecho "TruffleHog findings: $SECRETS_FOUND"[0m
-2026-08-10T04:00:26.1581094Z [36;1mif [ "$SECRETS_FOUND" -gt 0 ]; then[0m
-2026-08-10T04:00:26.1582826Z [36;1m  echo "::error::TruffleHog detected potential secrets in the repository"[0m
-2026-08-10T04:00:26.1584489Z [36;1m  exit 1[0m
-2026-08-10T04:00:26.1585504Z [36;1mfi[0m
-2026-08-10T04:00:26.1621290Z shell: /usr/bin/bash -e {0}
-2026-08-10T04:00:26.1622499Z ##[endgroup]
-2026-08-10T04:00:31.8793548Z TruffleHog findings: 1
-2026-08-10T04:00:31.8813469Z ##[error]TruffleHog detected potential secrets in the repository
-2026-08-10T04:00:31.8823960Z ##[error]Process completed with exit code 1.
-﻿2026-08-10T04:00:31.8904026Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
-2026-08-10T04:00:31.8905667Z ##[group]Run actions/upload-artifact@v4
-2026-08-10T04:00:31.8906018Z with:
-2026-08-10T04:00:31.8906323Z   name: secrets-scan-results
-2026-08-10T04:00:31.8906730Z   path: trufflehog-results.json
-gitleaks-report.json
-
-2026-08-10T04:00:31.8907118Z   retention-days: 30
-2026-08-10T04:00:31.8907843Z   if-no-files-found: warn
-2026-08-10T04:00:31.8908187Z   compression-level: 6
-2026-08-10T04:00:31.8908825Z   overwrite: false
-2026-08-10T04:00:31.8909178Z   include-hidden-files: false
-2026-08-10T04:00:31.8909497Z ##[endgroup]
-2026-08-10T04:00:32.0351478Z (node:2212) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
-2026-08-10T04:00:32.0352507Z (Use `node --trace-deprecation ...` to show where the warning was created)
-2026-08-10T04:00:32.0394533Z Multiple search paths detected. Calculating the least common ancestor of all paths
-2026-08-10T04:00:32.0399428Z The least common ancestor is /home/runner/work/pace-stagecraft-monorepo/pace-stagecraft-monorepo. This will be the root directory of the artifact
-2026-08-10T04:00:32.0400730Z With the provided path, there will be 1 file uploaded
-2026-08-10T04:00:32.0402121Z Artifact name is valid!
-2026-08-10T04:00:32.0402653Z Root directory input is valid!
-2026-08-10T04:00:32.3274378Z Beginning upload of artifact content to blob storage
-2026-08-10T04:00:32.3419448Z (node:2212) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
-2026-08-10T04:00:32.5765260Z Uploaded bytes 581
-2026-08-10T04:00:32.6403524Z Finished uploading artifact content to blob storage!
-2026-08-10T04:00:32.6404607Z SHA256 digest of uploaded artifact zip is c63a632296910cd8c12169a78a0f07585ca10c9d3312b94b416c2cddeba332c6
-2026-08-10T04:00:32.6413297Z Finalizing artifact upload
-2026-08-10T04:00:32.8648780Z Artifact secrets-scan-results.zip successfully finalized. Artifact ID 9050032653
-2026-08-10T04:00:32.8649904Z Artifact secrets-scan-results has been successfully uploaded! Final size is 581 bytes. Artifact ID is 9050032653
-2026-08-10T04:00:32.8659825Z Artifact download URL: https://github.com/StagecraftOps/pace-stagecraft-monorepo/actions/runs/31354180492/artifacts/9050032653
-2026-08-10T04:00:21.3150000Z Evaluating secrets-scan.if
-2026-08-10T04:00:21.3150000Z Evaluating: success()
-2026-08-10T04:00:21.3150000Z Result: true
-2026-08-10T04:00:21.3170000Z Requested labels: ubuntu-latest
-2026-08-10T04:00:21.3170000Z Job defined at: StagecraftOps/pace-stagecraft-monorepo/.github/workflows/compliance-security-audit.yml@refs/heads/main
-2026-08-10T04:00:21.3170000Z Waiting for a runner to pick up this job...
-2026-08-10T04:00:21.3380000Z Job is waiting for a hosted runner to come online.
-2026-08-10T04:00:21.3390000Z Job is about to start running on the hosted runner: GitHub Actions 1000002692
+41Z   Downloading referencing-0.37.0-py3-none-any.whl.metadata (2.8 kB)
+2026-08-10T16:25:38.7316811Z Collecting rpds-py>=0.25.0 (from jsonschema)
+2026-08-10T16:25:38.7393455Z   Downloading rpds_py-2026.6.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.1 kB)
+2026-08-10T16:25:38.8351725Z Collecting typing-extensions>=4.4.0 (from referencing>=0.28.4->jsonschema)
+2026-08-10T16:25:38.8427447Z   Downloading typing_extensions-4.16.0-py3-none-any.whl.metadata (3.3 kB)
+2026-08-10T16:25:38.8540020Z Downloading jsonschema-4.26.0-py3-none-any.whl (90 kB)
+2026-08-10T16:25:38.8726128Z Downloading pyyaml-6.0.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (806 kB)
+2026-08-10T16:25:38.9016170Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 806.6/806.6 kB 34.3 MB/s  0:00:00
+2026-08-10T16:25:38.9087714Z Downloading attrs-26.1.0-py3-none-any.whl (67 kB)
+2026-08-10T16:25:38.9179174Z Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl (18 kB)
+2026-08-10T16:25:38.9271182Z Downloading referencing-0.37.0-py3-none-any.whl (26 kB)
+2026-08-10T16:25:38.9364952Z Downloading rpds_py-2026.6.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (371 kB)
+2026-08-10T16:25:38.9472428Z Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
+2026-08-10T16:25:38.9849102Z Installing collected packages: typing-extensions, rpds-py, pyyaml, attrs, referencing, jsonschema-specifications, jsonschema
+2026-08-10T16:25:39.2097468Z 
+2026-08-10T16:25:39.2107786Z Successfully installed attrs-26.1.0 jsonschema-4.26.0 jsonschema-specifications-2025.9.1 pyyaml-6.0.3 referencing-0.37.0 rpds-py-2026.6.3 typing-extensions-4.16.0
+2026-08-10T16:25:39.2115602Z 
+2026-08-10T16:25:39.2115973Z [notice] A new release of pip is available: 26.1.2 -> 26.2.1
+2026-08-10T16:25:39.2116454Z [notice] To update, run: pip install --upgrade pip
+﻿2026-08-10T16:25:39.2648200Z ##[group]Run python scripts/validate_schemas.py --schema-dir schemas/
+2026-08-10T16:25:39.2648799Z [36;1mpython scripts/validate_schemas.py --schema-dir schemas/[0m
+2026-08-10T16:25:39.2693256Z shell: /usr/bin/bash -e {0}
+2026-08-10T16:25:39.2693529Z env:
+2026-08-10T16:25:39.2693775Z   SERVICE_DIR: services/data/mls-ingestion
+2026-08-10T16:25:39.2694059Z   PYTHON_VERSION: 3.11
+2026-08-10T16:25:39.2694281Z   IMAGE_NAME: mls-ingestion
+2026-08-10T16:25:39.2694584Z   pythonLocation: /opt/hostedtoolcache/Python/3.11.15/x64
+2026-08-10T16:25:39.2695040Z   PKG_CONFIG_PATH: /opt/hostedtoolcache/Python/3.11.15/x64/lib/pkgconfig
+2026-08-10T16:25:39.2695470Z   Python_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.15/x64
+2026-08-10T16:25:39.2695856Z   Python2_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.15/x64
+2026-08-10T16:25:39.2696244Z   Python3_ROOT_DIR: /opt/hostedtoolcache/Python/3.11.15/x64
+2026-08-10T16:25:39.2696637Z   LD_LIBRARY_PATH: /opt/hostedtoolcache/Python/3.11.15/x64/lib
+2026-08-10T16:25:39.2696961Z ##[endgroup]
+2026-08-10T16:25:39.2850069Z python: can't open file '/home/runner/work/pace-stagecraft-monorepo/pace-stagecraft-monorepo/services/data/mls-ingestion/scripts/validate_schemas.py': [Errno 2] No such file or directory
+2026-08-10T16:25:39.2880728Z ##[error]Process completed with exit code 2.
+2026-08-10T16:25:31.5530000Z Evaluating validate-schema.if
+2026-08-10T16:25:31.5530000Z Evaluating: success()
+2026-08-10T16:25:31.5530000Z Result: true
+2026-08-10T16:25:31.5560000Z Requested labels: ubuntu-latest
+2026-08-10T16:25:31.5560000Z Job defined at: StagecraftOps/pace-stagecraft-monorepo/.github/workflows/ci-mls-ingestion.yml@refs/pull/36/merge
+2026-08-10T16:25:31.5560000Z Waiting for a runner to pick up this job...
+2026-08-10T16:25:32.1500000Z All GitHub-hosted runners with label [ubuntu-latest] are busy. For more information, see https://gh.io/job-concurrency-limits
+2026-08-10T16:25:32.1590000Z Job is waiting for a hosted runner to come online.
+2026-08-10T16:25:32.1590000Z Job is about to start running on the hosted runner: GitHub Actions 1000002734
 ```
 
 ## Instructions

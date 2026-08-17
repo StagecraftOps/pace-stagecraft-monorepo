@@ -64,10 +64,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node ${{ env.NODE_VERSION }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -76,7 +76,7 @@ jobs:
             services/${{ inputs.group }}/${{ matrix.service }}/package-lock.json
 
       - name: Restore shared packages
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             packages/shared-types/dist
@@ -98,7 +98,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ inputs.group }}-${{ matrix.service }}
           path: services/${{ inputs.group }}/${{ matrix.service }}/coverage
@@ -119,10 +119,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node ${{ env.NODE_VERSION }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -131,7 +131,7 @@ jobs:
             services/${{ inputs.group }}/${{ matrix.service }}/package-lock.json
 
       - name: Restore shared packages
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             packages/shared-types/dist
@@ -152,7 +152,7 @@ jobs:
           fi
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-${{ inputs.group }}-${{ matrix.service }}-${{ inputs.sha }}
           path: services/${{ inputs.group }}/${{ matrix.service }}/dist

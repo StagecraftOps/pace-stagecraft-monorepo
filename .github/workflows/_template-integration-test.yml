@@ -61,7 +61,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Start service dependencies with Docker Compose
         run: |
@@ -103,7 +103,7 @@ jobs:
           echo "Integration tests completed for ${{ inputs.service_name }}" >> integration-summary.txt
 
       - name: Upload integration test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ${{ inputs.service_name }}-integration-results-${{ github.sha }}

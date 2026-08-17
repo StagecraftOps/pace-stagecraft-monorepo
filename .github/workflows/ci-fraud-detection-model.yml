@@ -18,12 +18,12 @@ jobs:
   lint-typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Cache pip
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: fraud-model-${{ hashFiles('services/ml/fraud-detection-model/requirements*.txt') }}
@@ -42,12 +42,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [lint-typecheck]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Cache pip
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: fraud-model-${{ hashFiles('services/ml/fraud-detection-model/requirements*.txt') }}
@@ -59,7 +59,7 @@ jobs:
         run: pytest tests/unit/ -v --cov=src --cov-report=xml --cov-fail-under=85
         working-directory: services/ml/fraud-detection-model
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fraud-model-coverage
           path: services/ml/fraud-detection-model/coverage.xml
@@ -68,12 +68,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [lint-typecheck, unit-test]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Cache pip
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: fraud-model-${{ hashFiles('services/ml/fraud-detection-model/requirements*.txt') }}
@@ -101,7 +101,7 @@ jobs:
           --min-precision-at-recall-99 0.20
         working-directory: services/ml/fraud-detection-model
       - name: Upload fraud evaluation metrics
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fraud-model-metrics
           path: services/ml/fraud-detection-model/fraud_metrics.json
@@ -110,12 +110,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [model-evaluation]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Cache pip
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pip
           key: fraud-model-${{ hashFiles('services/ml/fraud-detection-model/requirements*.txt') }}
@@ -131,7 +131,7 @@ jobs:
           --max-fpr-disparity 0.02
         working-directory: services/ml/fraud-detection-model
       - name: Upload fairness report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fraud-model-fairness
           path: services/ml/fraud-detection-model/fairness_report.html

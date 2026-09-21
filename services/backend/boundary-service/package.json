@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@zillow/boundary-service",
   "version": "1.0.0",
   "description": "ZIP/city/county boundaries",
@@ -17,7 +17,7 @@
     "@zillow/shared-utils": "*"
   },
   "devDependencies": {
-    "typescript": "^5.4.5",
+    "typescript": "^7.0.2",
     "@types/node": "^20.12.7",
     "ts-node-dev": "^2.0.0"
   }

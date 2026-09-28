@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@zillow/market-insights-ui",
   "version": "1.0.0",
   "description": "Market trends and data viz",
@@ -18,7 +18,7 @@
   "devDependencies": {
     "typescript": "^5.4.5",
     "@types/react": "^18.3.1",
-    "@types/node": "^20.12.7",
+    "@types/node": "^26.6.2",
     "tailwindcss": "^3.4.3"
   }
 }

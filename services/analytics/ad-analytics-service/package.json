@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@zillow/ad-analytics-service",
   "version": "1.0.0",
   "description": "Ad campaign analytics",
@@ -17,7 +17,7 @@
     "@zillow/shared-utils": "*"
   },
   "devDependencies": {
-    "typescript": "^5.4.5",
+    "typescript": "^6.0.3",
     "@types/node": "^20.12.7",
     "ts-node-dev": "^2.0.0"
   }

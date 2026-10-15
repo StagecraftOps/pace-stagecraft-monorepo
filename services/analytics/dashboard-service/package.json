@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@zillow/dashboard-service",
   "version": "1.0.0",
   "description": "Analytics dashboard backend",
@@ -21,6 +21,6 @@
   "devDependencies": {
     "@nestjs/cli": "^10.3.2",
     "typescript": "^5.4.5",
-    "@types/node": "^20.12.7"
+    "@types/node": "^26.1.0"
   }
 }

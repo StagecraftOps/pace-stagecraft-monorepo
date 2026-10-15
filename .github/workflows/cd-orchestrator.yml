@@ -192,7 +192,7 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════
   cd-gate:
     name: "✅ CD Gate"
-    needs: deploy-groups
+    needs: [guard, build-matrix, approval]
     runs-on: ubuntu-latest
     if: always()
     steps:

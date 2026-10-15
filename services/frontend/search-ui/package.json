@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@zillow/search-ui",
   "version": "1.0.0",
   "description": "Advanced property search UI",
@@ -9,7 +9,7 @@
     "test": "vitest"
   },
   "dependencies": {
-    "react": "^18.3.1",
+    "react": "^19.2.7",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.23.1",
     "@zillow/shared-types": "*",

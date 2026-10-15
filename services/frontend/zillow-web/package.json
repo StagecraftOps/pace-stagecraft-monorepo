@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@zillow/zillow-web",
   "version": "1.0.0",
   "description": "Main Zillow consumer web app",
@@ -9,7 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "next": "^14.2.3",
+    "next": "^16.2.10",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "@zillow/shared-types": "*",
